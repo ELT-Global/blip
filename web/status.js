@@ -76,7 +76,7 @@ function renderHome(list) {
   const head = h('div', { class: 'card summary' },
     h('span', { class: 'dot ' + (down.length ? 'down' : list.length ? 'up' : '') }),
     h('div', {},
-      h('h1', {}, !list.length ? 'No monitors yet' : down.length ? `${down.length} of ${list.length} down` : 'All systems operational'),
+      h('h1', {}, !list.length ? 'No monitors yet.' : down.length ? `${down.length} of ${list.length} down.` : 'All systems operational.'),
       h('div', { class: 'muted' }, down.length ? down.map(m => m.name).join(', ') : 'Updated ' + fmt.time(Date.now() / 1000))));
 
   const cards = list.map(m => h('a', { class: 'card mon', href: '/m/' + m.id, 'data-link': true },
@@ -192,7 +192,8 @@ async function detail(id, v) {
   function renderLatency(points, from, to) {
     const { level, day, hour } = st.at;
     const edge = t => to - from > 6 * 3600 ? fmt.date(t) + ' ' + fmt.time(t) : fmt.time(t);
-    const title = { days: 'last 24 hours', hours: fmt.date(day), checks: fmt.date(hour) + ', ' + fmt.time(hour) }[level];
+    // Only the active level's fields are set, so build just its title.
+    const title = level === 'days' ? 'last 24 hours' : level === 'hours' ? fmt.date(day) : fmt.date(hour) + ', ' + fmt.time(hour);
     const ok = points.filter(p => p.up).map(p => p.ms);
     const stats = ok.length ? ` · avg ${fmt.ms(ok.reduce((a, b) => a + b, 0) / ok.length)} · max ${fmt.ms(ok.reduce((a, b) => Math.max(a, b)))}` : '';
     fill(els.latency,

@@ -205,12 +205,6 @@ export function latencyChart(points, from, to, minGap) {
   const y = ms => H - Math.min(ms, top) / top * (H - 8);
 
   const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none' });
-  const defs = s('defs', {});
-  const grad = s('linearGradient', { id: 'fade', x1: 0, y1: 0, x2: 0, y2: 1 });
-  grad.append(s('stop', { offset: 0, 'stop-color': '#2b8cff', 'stop-opacity': .28 }),
-    s('stop', { offset: 1, 'stop-color': '#2b8cff', 'stop-opacity': 0 }));
-  defs.append(grad);
-  svg.append(defs);
   const g = s('g', { class: 'grid' });
   for (const f of [0.25, 0.5, 0.75]) g.append(s('line', { x1: 0, x2: W, y1: y(top * f), y2: y(top * f) }));
   svg.append(g);
