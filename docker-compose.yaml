@@ -1,0 +1,15 @@
+# For Coolify's Docker Compose build pack. No host ports are published:
+# Coolify's proxy routes the domain to the container's port 8080.
+services:
+  blip:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      - SERVICE_FQDN_BLIP_8080
+    volumes:
+      - blip-data:/data
+
+volumes:
+  blip-data:

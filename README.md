@@ -1,2 +1,73 @@
 # blip
-yet another uptime monitoring tool
+
+A small, fast uptime monitor: one Go binary, one SQLite file, and a
+plain HTML/CSS/JS status page and admin panel (installable as a PWA).
+
+- `/` shows monitors with 30-day uptime. Visitors see public monitors;
+  signed-in users also see private ones and their target URLs.
+- `/m/{id}` shows 90 days of daily blocks. Click a day to see its hours, and
+  an hour to see every check, with a latency chart for the same range.
+  Incidents open and close automatically; users with write access can add notes.
+- `/panel` is the admin panel: sign in with email and an authenticator code (TOTP).
+  - **Monitors**: method, URL, frequency (10s to 24h) and public/private visibility.
+  - **Users**: invite users as Read, Write or Root. Invites are one-time setup
+    links that expire after 7 days.
+  - **Settings**: database size per table, retention, Trim and Vacuum.
+
+## Deploy on Coolify
+
+Create a resource from this repository with either build pack:
+
+- **Docker Compose** (recommended): uses `docker-compose.yaml`, which keeps
+  `/data` in a named volume and routes your domain to port 8080. Nothing is
+  published on the host.
+- **Dockerfile**: the image declares `EXPOSE 8080`; make sure the port
+  (*Ports Exposes*) is `8080` and add a persistent storage mount at `/data`.
+
+The container only listens on 8080 inside Coolify's network; no host port is
+bound in either setup.
+
+Then open the container's terminal in Coolify and create the first account:
+
+```sh
+api bootstrap
+```
+
+It asks for an email, shows a QR code for your authenticator app, and saves
+the account once you enter a valid code. Running it again for the same email
+resets that account's authenticator, which is the recovery path.
+
+## Configuration
+
+| Variable  | Default   | Purpose                  |
+|-----------|-----------|--------------------------|
+| `PORT`    | `8080`    | HTTP listen port         |
+| `BLIP_DB` | `blip.db` | SQLite file (`/data/blip.db` in the image) |
+
+Run blip behind a TLS-terminating proxy (Coolify does this) and don't expose
+its port directly: session cookies are marked `Secure` when the proxy sends
+`X-Forwarded-Proto: https`, and sign-in rate limits key on the client address
+the proxy appends to `X-Forwarded-For`. Each address, each email and each
+invite gets 10 attempts per 15-minute window, so 10 wrong codes lock that
+account's sign-in until the window ends.
+
+## Storage
+
+Checks are stored as `(monitor, time, latency, status)` in a `WITHOUT ROWID`
+table, roughly 20 bytes each on disk, and every check is also added to an hourly
+rollup. By default raw checks are kept for 30 days and rollups for 400, so
+history older than 30 days is quantized to hourly resolution. Resolved
+incidents are deleted along with the rollups for their time. Trimming runs
+hourly; adjust the limits under **Settings**.
+
+## Development
+
+```sh
+go test ./...
+go run ./cmd/api            # http://localhost:8080
+go run ./cmd/api bootstrap
+go generate ./web           # re-render the PNG icons from the glyph in genicons.go
+```
+
+The only dependency is `modernc.org/sqlite`, a pure-Go SQLite, so builds need
+no C toolchain (`CGO_ENABLED=0`).
