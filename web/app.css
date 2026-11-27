@@ -209,6 +209,8 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted-foreground)
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted-foreground); opacity: .7; }
 .dot.up { background: var(--dot-up); opacity: 1; }
 .dot.down { background: var(--destructive); opacity: 1; box-shadow: 0 0 0 3px color-mix(in oklab, var(--destructive) 20%, transparent); }
+.dot.degr { background: var(--warning); opacity: 1; }
+.dot.maint { background: transparent; opacity: 1; box-shadow: inset 0 0 0 2px var(--muted-foreground); }
 .summary .dot { width: 10px; height: 10px; }
 
 /* --- monitor list --- */
@@ -238,8 +240,11 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted-foreground)
 .bars > .up { background: var(--bar-up); }
 .bars > .part { background: var(--warning); }
 .bars > .down { background: var(--destructive); }
+/* degraded: up, but the health body warned; quieter than a partial outage */
+.bars > .degr { background: color-mix(in oklab, var(--warning) 55%, var(--card)); }
 .bars > button { cursor: zoom-in; }
 .bars > button.up:hover { background: var(--bar-up); }
+.bars > button.degr:hover { background: color-mix(in oklab, var(--warning) 55%, var(--card)); }
 .bars > button.part:hover { background: var(--warning); }
 .bars > button.down:hover { background: var(--destructive); }
 .bars > button:active { transform: none; }
@@ -280,6 +285,26 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted-foreground)
 .chart .grid line { stroke: var(--chart-grid); vector-effect: non-scaling-stroke; }
 .chart .fail { fill: var(--destructive); }
 .chart .cross { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart .mark { stroke: var(--brand-text); stroke-opacity: .55; stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.chart .mark.restart, .chart .mark.start { stroke: var(--muted-foreground); }
+
+/* --- health --- */
+/* .slot holds a card only when there is something to show */
+.card + .slot:not(:empty), .slot:not(:empty) + .card, .card + .slot:empty + .card { margin-top: 16px; }
+.health-msg { margin: 0 0 12px; overflow-wrap: anywhere; }
+p.stale { margin-bottom: 10px; color: var(--warning-foreground); }
+.components, .events { list-style: none; margin: 0; padding: 0; }
+.components li, .events li { display: flex; align-items: center; gap: 10px; padding: 8px 0; font-size: 13px; }
+.components li + li, .events li + li { border-top: 1px solid var(--border); }
+.components .cname { font-weight: 500; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.components .cout { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.components .cstat { margin-left: auto; font-size: 12px; color: var(--subtle-foreground); }
+.events .ekind { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.events li.deploy .ekind::before { content: "↑ "; color: var(--brand-text); }
+.events li .muted { font-size: 12px; font-variant-numeric: tabular-nums; }
+details.fields summary { cursor: pointer; font-size: 13px; color: var(--subtle-foreground); }
+details.fields[open] summary { margin-bottom: 10px; }
+details.fields .grid { margin-top: 10px; }
 .axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--subtle-foreground); margin-top: 8px; }
 .yaxis { position: absolute; top: -4px; left: 0; font-family: var(--mono); font-size: 11px; color: var(--subtle-foreground); pointer-events: none; }
 .tip {

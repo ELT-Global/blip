@@ -4,7 +4,7 @@
     "title": "blip API",
     "version": "1.0.0",
     "summary": "Read uptime, latency and incident data for your monitors.",
-    "description": "The blip API is read-only and returns JSON. It serves the same monitor data as the status page: current status, daily and hourly uptime, every raw check, and incidents with their notes.\n\nEvery endpoint works without credentials for **public** monitors. An API key adds private monitors and each monitor's method and URL.\n\n```sh\ncurl \"$BLIP_URL/api/monitors\" -H \"Authorization: Bearer $BLIP_KEY\"\n```\n\n## Authentication\n\nCreate a key in the panel under **API**, then send it as a bearer token in the `Authorization` header.\n\nKeys look like `blip_k7m2q9xd_3f8hw2c9tqzv6n1mbxr4e5ka`. The first part, `blip_k7m2q9xd`, is the key's public prefix, which the panel lists so you can tell keys apart. The rest is the secret. blip stores only a hash of it and shows it once, when the key is created or rotated.\n\n- A key sees exactly the monitors it was scoped to (or all of them), public or private.\n- An invalid, revoked, rotated or expired key gets `401`. It never falls back to public data, so a broken integration fails loudly.\n- Keys are read-only. They can't change monitors or reach the panel's own endpoints.\n- Rotating a key issues a new secret and restarts its expiry. The old secret stops working at once.\n\nRequests without an `Authorization` header see public monitors only, without their method and URL. Signed-in panel sessions see everything.\n\n## Errors\n\nErrors use standard HTTP status codes with a JSON body holding one message:\n\n```json\n{ \"error\": \"API key has expired\" }\n```\n\n- `401`: the key is malformed, unknown or expired. The response carries `WWW-Authenticate: Bearer`.\n- `404`: the monitor doesn't exist **or** the caller can't see it. The two are indistinguishable on purpose.\n- `500`: an unexpected server error. Retry with backoff.\n\n## Time and units\n\n- Timestamps are Unix seconds, UTC.\n- `ms` is latency in milliseconds.\n- `code` is the HTTP status a check received, or a negative value when no response arrived: `0` connection error, `-1` timeout, `-2` DNS failure, `-3` connection refused, `-4` TLS error. Statuses 200–399 count as up.\n- Hourly buckets align to UTC hours. Daily buckets start at local midnight for the `tz` offset you pass.\n- Buckets are sparse: hours and days without checks are left out.\n- Ranges are half-open: `from` is included, `to` is not.\n\n## Retention\n\nRaw checks are kept for 30 days and hourly rollups for 400 days by default. An admin can change both in the panel, so older ranges may come back shorter than requested."
+    "description": "The blip API is read-only and returns JSON. It serves the same monitor data as the status page: current status, daily and hourly uptime, every raw check, and incidents with their notes.\n\nEvery endpoint works without credentials for **public** monitors. An API key adds private monitors and each monitor's method and URL.\n\n```sh\ncurl \"$BLIP_URL/api/monitors\" -H \"Authorization: Bearer $BLIP_KEY\"\n```\n\n## Authentication\n\nCreate a key in the panel under **API**, then send it as a bearer token in the `Authorization` header.\n\nKeys look like `blip_k7m2q9xd_3f8hw2c9tqzv6n1mbxr4e5ka`. The first part, `blip_k7m2q9xd`, is the key's public prefix, which the panel lists so you can tell keys apart. The rest is the secret. blip stores only a hash of it and shows it once, when the key is created or rotated.\n\n- A key sees exactly the monitors it was scoped to (or all of them), public or private.\n- An invalid, revoked, rotated or expired key gets `401`. It never falls back to public data, so a broken integration fails loudly.\n- Keys are read-only. They can't change monitors or reach the panel's own endpoints.\n- Rotating a key issues a new secret and restarts its expiry. The old secret stops working at once.\n\nRequests without an `Authorization` header see public monitors only, without their method and URL. Signed-in panel sessions see everything.\n\n## Errors\n\nErrors use standard HTTP status codes with a JSON body holding one message:\n\n```json\n{ \"error\": \"API key has expired\" }\n```\n\n- `401`: the key is malformed, unknown or expired. The response carries `WWW-Authenticate: Bearer`.\n- `404`: the monitor doesn't exist **or** the caller can't see it. The two are indistinguishable on purpose.\n- `500`: an unexpected server error. Retry with backoff.\n\n## Time and units\n\n- Timestamps are Unix seconds, UTC.\n- `ms` is latency in milliseconds.\n- `code` is the HTTP status a check received, or a negative value when no response arrived: `0` connection error, `-1` timeout, `-2` DNS failure, `-3` connection refused, `-4` TLS error, `-5` the response arrived but its health body reported failure. Statuses 200–399 count as up.\n- Hourly buckets align to UTC hours. Daily buckets start at local midnight for the `tz` offset you pass.\n- Buckets are sparse: hours and days without checks are left out.\n- Ranges are half-open: `from` is included, `to` is not.\n\n## Health bodies\n\nWhen a check's response body describes the service's health, blip reads it. It recognises the IETF `application/health+json` draft, Spring Boot Actuator, MicroProfile Health, ASP.NET Core HealthChecks, Atlassian Statuspage, Elasticsearch cluster health, one-word bodies such as `Healthy` or `Degraded`, and plain JSON with familiar field names such as `status`, `version`, `commit`, `uptime`, `started_at` and `hostname`. A monitor can also point at its own fields, or turn this off.\n\n- A body reporting **fail** marks the check down with code `-5`, even with a `200` status, and opens an incident naming the failing components.\n- **warn** keeps the check up but marks it degraded: `Check.health` is `warn` and buckets count it in `warn`.\n- **maintenance** keeps the check up.\n- The latest body is summarised in `Monitor.report`. Callers without a key or session get only its status.\n- When a check's body can't be read (a proxy's error page, say), `report` keeps the last one that could. Compare `report.t` with `last.t` to tell.\n- Changing a monitor's method, URL or health settings hides its earlier report and starts tracking afresh, so pointing at a different version field isn't logged as a deploy.\n- Version changes and process restarts become events. A new version must be seen on two checks in a row, so a rollout flapping between old and new instances logs one deploy. Start times come from a `started_at`-style field or from `uptime`, whose unit blip learns from how fast it grows. A process first seen behind a load balancer only counts as restarted if it started after the previous check.\n\n## Retention\n\nRaw checks are kept for 30 days, and hourly rollups and events for 400 days, by default. An admin can change both in the panel, so older ranges may come back shorter than requested."
   },
   "servers": [
     { "url": "/", "description": "This blip instance" }
@@ -154,6 +154,44 @@
         }
       }
     },
+    "/api/monitors/{id}/events": {
+      "get": {
+        "operationId": "getMonitorEvents",
+        "tags": ["Monitors"],
+        "summary": "Deploys and restarts",
+        "description": "Returns version changes and process restarts read from the monitor's health bodies, newest first. Callers without a key or session get only each event's `t` and `kind`.",
+        "parameters": [
+          { "$ref": "#/components/parameters/id" },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the range, Unix seconds (inclusive). Defaults to 90 days before `to`.",
+            "schema": { "type": "integer" },
+            "example": 1764201600
+          },
+          { "$ref": "#/components/parameters/to" },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many events to return.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
+            "example": 100
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events, newest first.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Event" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/api/openapi.json": {
       "get": {
         "operationId": "getOpenAPI",
@@ -249,7 +287,7 @@
       "Monitor": {
         "type": "object",
         "description": "An HTTP endpoint that blip checks on a fixed interval.",
-        "required": ["id", "name", "interval", "public", "last", "days"],
+        "required": ["id", "name", "interval", "public", "last", "report", "days"],
         "additionalProperties": false,
         "properties": {
           "id": { "type": "integer", "description": "Stable ID. IDs of deleted monitors are never reused.", "example": 1 },
@@ -268,9 +306,14 @@
           },
           "interval": { "type": "integer", "description": "Seconds between checks.", "example": 60 },
           "public": { "type": "boolean", "description": "Whether the monitor is listed on the public status page.", "example": true },
+          "health": { "$ref": "#/components/schemas/HealthConfig" },
           "last": {
             "description": "The most recent check, or `null` before the first one.",
             "oneOf": [{ "$ref": "#/components/schemas/Check" }, { "type": "null" }]
+          },
+          "report": {
+            "description": "What the latest health body said, or `null` if no body has been understood yet.",
+            "oneOf": [{ "$ref": "#/components/schemas/Report" }, { "type": "null" }]
           },
           "days": {
             "type": "array",
@@ -289,21 +332,96 @@
           "ms": { "type": "integer", "description": "Response time in milliseconds.", "example": 142 },
           "code": {
             "type": "integer",
-            "description": "HTTP status, or `0` connection error, `-1` timeout, `-2` DNS failure, `-3` connection refused, `-4` TLS error. 200–399 is up.",
+            "description": "HTTP status, or `0` connection error, `-1` timeout, `-2` DNS failure, `-3` connection refused, `-4` TLS error, `-5` health body reported failure. 200–399 is up.",
             "example": 200
+          },
+          "health": {
+            "type": "string",
+            "description": "The status the response body reported. Left out when the body said nothing blip understood.",
+            "enum": ["pass", "warn", "fail", "maintenance"],
+            "example": "pass"
           }
         }
       },
       "Bucket": {
         "type": "object",
         "description": "Checks aggregated over an hour or a day.",
-        "required": ["t", "n", "up", "ms"],
+        "required": ["t", "n", "up", "warn", "ms"],
         "additionalProperties": false,
         "properties": {
           "t": { "type": "integer", "description": "Start of the bucket, Unix seconds.", "example": 1764201600 },
           "n": { "type": "integer", "description": "Number of checks.", "example": 1440 },
           "up": { "type": "integer", "description": "How many of them were up. Uptime is `up / n`.", "example": 1438 },
+          "warn": { "type": "integer", "description": "How many of the up checks reported degraded health.", "example": 3 },
           "ms": { "type": "integer", "description": "Mean response time of the successful checks, or `0` if none succeeded.", "example": 138 }
+        }
+      },
+      "HealthConfig": {
+        "type": "object",
+        "description": "How a monitor's response bodies are read. Only present for API keys and signed-in users. Each path overrides detection for one field, as a dotted path into the JSON body such as `app.build.version` or `checks.0.status`.",
+        "required": ["mode"],
+        "additionalProperties": false,
+        "properties": {
+          "mode": { "type": "string", "description": "`auto` reads bodies, `off` ignores them.", "enum": ["auto", "off"], "example": "auto" },
+          "status": { "type": "string", "description": "Path to the overall status.", "example": "state.overall" },
+          "version": { "type": "string", "description": "Path to the version.", "example": "build.version" },
+          "started": { "type": "string", "description": "Path to the process start time: an ISO 8601 date or a Unix time in seconds or milliseconds.", "example": "process.started_at" },
+          "uptime": { "type": "string", "description": "Path to the uptime: a number, whose unit blip learns, or a duration such as `72h3m` or `PT3H`.", "example": "process.uptime" },
+          "instance": { "type": "string", "description": "Path to an ID naming the instance that answered.", "example": "host.name" }
+        }
+      },
+      "Report": {
+        "type": "object",
+        "description": "The latest health body, as blip understood it. Callers without a key or session get only `t` and `status`.",
+        "required": ["t", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "t": { "type": "integer", "description": "When the body was read, Unix seconds.", "example": 1764287940 },
+          "format": { "type": "string", "description": "The format blip recognised.", "example": "Spring Boot Actuator" },
+          "status": {
+            "type": "string",
+            "description": "The overall status. Empty when the body gave other details but no status.",
+            "enum": ["", "pass", "warn", "fail", "maintenance"],
+            "example": "pass"
+          },
+          "version": { "type": "string", "description": "The release, with the short commit when both are given.", "example": "2.4.1 (9f2c1e7)" },
+          "instance": { "type": "string", "description": "The instance that answered.", "example": "web-3" },
+          "started": { "type": "integer", "description": "When the process started, Unix seconds.", "example": 1764201600 },
+          "message": { "type": "string", "description": "The body's own message, if any.", "example": "Replica lag 4s" },
+          "components": {
+            "type": "array",
+            "description": "Dependencies the body reported on, such as databases and caches.",
+            "items": { "$ref": "#/components/schemas/Component" }
+          }
+        }
+      },
+      "Component": {
+        "type": "object",
+        "description": "One dependency in a health body.",
+        "required": ["name", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "example": "db" },
+          "status": { "type": "string", "enum": ["pass", "warn", "fail", "maintenance"], "example": "pass" },
+          "output": { "type": "string", "description": "What the component said about itself.", "example": "connection pool 80% used" }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "A change noticed between health bodies.",
+        "required": ["t", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "t": { "type": "integer", "description": "When it happened, Unix seconds: when the new version was first seen, or when the process started.", "example": 1764250200 },
+          "kind": {
+            "type": "string",
+            "description": "`deploy`: the version changed. `restart`: a known process started again. `start`: a new instance appeared.",
+            "enum": ["deploy", "restart", "start"],
+            "example": "deploy"
+          },
+          "instance": { "type": "string", "description": "The instance, when the body names one.", "example": "web-3" },
+          "from": { "type": "string", "description": "The previous version, for deploys.", "example": "2.4.0" },
+          "to": { "type": "string", "description": "The new version, for deploys.", "example": "2.4.1" }
         }
       },
       "Incident": {

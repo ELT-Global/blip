@@ -65,7 +65,7 @@ type Stats struct {
 	Retained Retention   `json:"retention"`
 }
 
-var dataTables = []string{"checks", "hours", "incidents", "notes", "monitors", "users", "sessions", "api_keys"}
+var dataTables = []string{"checks", "hours", "incidents", "notes", "events", "reports", "monitors", "users", "sessions", "api_keys"}
 
 // Stats reports database size and per-table row counts and bytes.
 func (db *DB) Stats(ctx context.Context) (Stats, error) {
@@ -117,6 +117,7 @@ type TrimResult struct {
 	Checks    int64 `json:"checks"`
 	Hours     int64 `json:"hours"`
 	Incidents int64 `json:"incidents"`
+	Events    int64 `json:"events"`
 }
 
 // Trim applies the retention policy as of now, then returns freed pages to
@@ -156,6 +157,9 @@ func (db *DB) Trim(ctx context.Context, now time.Time) (TrimResult, error) {
 			return err
 		}
 		if err := del(hourCut, "DELETE FROM incidents WHERE monitor_id=? AND ended<?", &res.Incidents); err != nil {
+			return err
+		}
+		if err := del(hourCut, "DELETE FROM events WHERE monitor_id=? AND t<?", &res.Events); err != nil {
 			return err
 		}
 		_, err = tx.Exec("DELETE FROM sessions WHERE exp<?", now.Unix())

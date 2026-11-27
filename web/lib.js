@@ -108,10 +108,20 @@ export const fmt = {
 // codeText explains a stored check code: an HTTP status, or a negative
 // value for transport failures (see store.Code*).
 export function codeText(code) {
-  return { 0: 'Connection error', '-1': 'Timeout', '-2': 'DNS failure', '-3': 'Connection refused', '-4': 'TLS error' }[code]
+  return { 0: 'Connection error', '-1': 'Timeout', '-2': 'DNS failure', '-3': 'Connection refused', '-4': 'TLS error', '-5': 'Unhealthy' }[code]
     ?? 'HTTP ' + code;
 }
 export const isUp = code => code >= 200 && code < 400;
+
+// state sums up a check: down; degraded or under maintenance (up, but its
+// health body said so); up; or none before the first check.
+export function state(c) {
+  if (!c) return 'none';
+  if (!isUp(c.code)) return 'down';
+  return { warn: 'degr', maintenance: 'maint' }[c.health] || 'up';
+}
+export const stateText = { none: 'Pending', down: 'Down', degr: 'Degraded', maint: 'Maintenance', up: 'Up' };
+export const healthText = { pass: 'Healthy', warn: 'Degraded', fail: 'Failing', maintenance: 'Maintenance' };
 
 // --- time slots ---
 
@@ -158,13 +168,13 @@ function showTip(x, y, text) {
 // hideTip must also run before re-renders: removed nodes never fire pointerleave.
 export const hideTip = () => tipEl.classList.add('hidden');
 
-// bars renders one block per slot. Each slot is {n, up, label, detail}
-// where n=0 means no data. With onPick, blocks that have data are buttons
+// bars renders one block per slot. Each slot is {n, up, warn, label, detail}
+// where n=0 means no data and warn counts degraded checks. With onPick, blocks that have data are buttons
 // that zoom in, so they work from the keyboard too.
 export function bars(slots, { cls = '', label = 'Uptime', onPick } = {}) {
   const el = h('div', { class: 'bars ' + cls, role: 'group', 'aria-label': label });
   for (const s of slots) {
-    const state = !s.n ? 'none' : s.up === s.n ? 'up' : s.up === 0 ? 'down' : 'part';
+    const state = !s.n ? 'none' : s.up === s.n ? (s.warn ? 'degr' : 'up') : s.up === 0 ? 'down' : 'part';
     const text = s.label + (s.n ? ' · ' + s.detail : ' · no data');
     const pick = onPick && s.n;
     const b = pick
@@ -198,8 +208,9 @@ function niceMax(v) {
 
 // latencyChart plots points [{t, ms, up}] across [from, to). Missing data
 // (a gap well beyond both the usual spacing and minGap seconds) breaks the
-// line; failed checks are marked along the baseline.
-export function latencyChart(points, from, to, minGap) {
+// line; failed checks are marked along the baseline, and marks [{t, kind,
+// label}] (deploys and restarts) as vertical rules.
+export function latencyChart(points, from, to, minGap, marks = []) {
   if (!points.length) return h('div', { class: 'empty' }, 'No checks in this range yet.');
   const ok = points.filter(p => p.up);
   const steps = ok.slice(1).map((p, i) => p.t - ok[i].t).sort((a, b) => a - b);
@@ -234,13 +245,16 @@ export function latencyChart(points, from, to, minGap) {
   close();
   svg.append(s('path', { class: 'area', d: area }), s('path', { class: 'line', d: line }));
   for (const p of points) if (!p.up) svg.append(s('rect', { class: 'fail', x: x(p.t) - 1.5, y: H - 10, width: 3, height: 10 }));
+  marks = marks.filter(m => m.t >= from && m.t < to);
+  for (const m of marks) svg.append(s('line', { class: 'mark ' + m.kind, x1: x(m.t), x2: x(m.t), y1: 0, y2: H }));
   const cross = s('line', { class: 'cross hidden', y1: 0, y2: H });
   svg.append(cross);
 
   const wrap = h('div', {
     class: 'chart', role: 'img',
     'aria-label': `Response time: ${points.length} checks, ${points.length - ok.length} failed` +
-      (ok.length ? `, ${fmt.ms(sorted[0])} to ${fmt.ms(sorted.at(-1))}` : ''),
+      (ok.length ? `, ${fmt.ms(sorted[0])} to ${fmt.ms(sorted.at(-1))}` : '') +
+      (marks.length ? `, ${marks.length} deploys or restarts` : ''),
   });
   wrap.append(svg, h('div', { class: 'yaxis' }, fmt.ms(top)));
   // Nearest point by binary search on time.
@@ -251,9 +265,13 @@ export function latencyChart(points, from, to, minGap) {
     while (lo < hi) { const mid = (lo + hi) >> 1; points[mid].t < t ? lo = mid + 1 : hi = mid; }
     if (lo > 0 && t - points[lo - 1].t < points[lo].t - t) lo--;
     const p = points[lo];
-    cross.setAttribute('x1', x(p.t)); cross.setAttribute('x2', x(p.t));
+    // A mark within a few pixels of the pointer wins over the nearest check.
+    const near = (to - from) * 6 / r.width;
+    const m = marks.find(m => Math.abs(m.t - t) <= near);
+    const at = m ? m.t : p.t;
+    cross.setAttribute('x1', x(at)); cross.setAttribute('x2', x(at));
     cross.classList.remove('hidden');
-    showTip(e.clientX, e.clientY, `${p.label} · ${p.up ? fmt.ms(p.ms) : p.text}`);
+    showTip(e.clientX, e.clientY, m ? m.label : `${p.label} · ${p.up ? fmt.ms(p.ms) : p.text}`);
   });
   wrap.addEventListener('pointerleave', () => { cross.classList.add('hidden'); hideTip(); });
   return wrap;

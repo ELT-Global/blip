@@ -61,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	h("GET /api/monitors/{id}/hours", s.monitorHours)
 	h("GET /api/monitors/{id}/checks", s.monitorChecks)
 	h("GET /api/monitors/{id}/incidents", s.monitorIncidents)
+	h("GET /api/monitors/{id}/events", s.monitorEvents)
 	h("POST /api/monitors", s.need(store.RoleWrite, s.createMonitor))
 	h("PUT /api/monitors/{id}", s.need(store.RoleWrite, s.updateMonitor))
 	h("DELETE /api/monitors/{id}", s.need(store.RoleWrite, s.deleteMonitor))

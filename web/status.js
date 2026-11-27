@@ -1,5 +1,5 @@
 // Public status page: the monitor list at / and monitor detail at /m/{id}.
-import { h, $, fill, api, tz, fmt, codeText, isUp, bars, hideTip, latencyChart, localDays, dayHours, dayKey, poll, toast, registerSW } from './lib.js';
+import { h, $, fill, api, tz, fmt, codeText, isUp, state, stateText, healthText, bars, hideTip, latencyChart, localDays, dayHours, dayKey, poll, toast, registerSW } from './lib.js';
 
 const app = $('#app');
 let me = null;
@@ -47,17 +47,28 @@ const offline = () => toast('Offline, retrying…', true);
 function daySlots(buckets, n) {
   const by = new Map(buckets.map(b => [dayKey(b.t), b]));
   return localDays(n).map(t => {
-    const b = by.get(dayKey(t)) || { n: 0, up: 0 };
-    return { t, n: b.n, up: b.up, label: fmt.date(t), detail: summary(b) };
+    const b = by.get(dayKey(t)) || { n: 0, up: 0, warn: 0 };
+    return { t, n: b.n, up: b.up, warn: b.warn, label: fmt.date(t), detail: summary(b) };
   });
 }
 
-const summary = b => `${fmt.pct(b.up, b.n)} up · ${b.n} checks` + (b.ms ? ` · avg ${fmt.ms(b.ms)}` : '');
+const summary = b => `${fmt.pct(b.up, b.n)} up · ${b.n} checks` + (b.warn ? ` · ${b.warn} degraded` : '') +
+  (b.ms ? ` · avg ${fmt.ms(b.ms)}` : '');
 const sum = (bs, k) => bs.reduce((a, b) => a + b[k], 0);
 
 function statusDot(m) {
-  if (!m.last) return h('span', { class: 'dot', title: 'Pending' });
-  return h('span', { class: 'dot ' + (isUp(m.last.code) ? 'up' : 'down'), title: isUp(m.last.code) ? 'Up' : 'Down' });
+  const st = state(m.last);
+  return h('span', { class: 'dot ' + st, title: stateText[st] });
+}
+
+// healthDot maps a reported status onto the dot styles.
+const healthDot = s => h('span', { class: 'dot ' + ({ pass: 'up', warn: 'degr', fail: 'down', maintenance: 'maint' }[s] || 'none'), title: healthText[s] || 'Unknown' });
+
+function eventText(e) {
+  const where = e.instance ? ` on ${e.instance}` : '';
+  if (e.kind === 'deploy') return (e.to ? `Deployed ${e.to}` : 'Deployed') + (e.from ? ` (was ${e.from})` : '');
+  if (e.kind === 'start') return 'New instance' + (e.instance ? ' ' + e.instance : '');
+  return 'Restarted' + where;
 }
 
 // --- list ---
@@ -72,12 +83,16 @@ async function home(v) {
 function renderHome(list) {
   document.title = 'blip · status';
   hideTip();
-  const down = list.filter(m => m.last && !isUp(m.last.code));
+  const down = list.filter(m => state(m.last) === 'down');
+  const degr = list.filter(m => state(m.last) === 'degr');
   const head = h('div', { class: 'card summary' },
-    h('span', { class: 'dot ' + (down.length ? 'down' : list.length ? 'up' : '') }),
+    h('span', { class: 'dot ' + (down.length ? 'down' : degr.length ? 'degr' : list.length ? 'up' : '') }),
     h('div', {},
-      h('h1', {}, !list.length ? 'No monitors yet.' : down.length ? `${down.length} of ${list.length} down.` : 'All systems operational.'),
-      h('div', { class: 'muted' }, down.length ? down.map(m => m.name).join(', ') : 'Updated ' + fmt.time(Date.now() / 1000))));
+      h('h1', {}, !list.length ? 'No monitors yet.' : down.length ? `${down.length} of ${list.length} down.`
+        : degr.length ? `${degr.length} of ${list.length} degraded.` : 'All systems operational.'),
+      h('div', { class: 'muted' }, down.length || degr.length
+        ? [...down, ...degr].map(m => m.name).join(', ')
+        : 'Updated ' + fmt.time(Date.now() / 1000))));
 
   const cards = list.map(m => h('a', { class: 'card mon', href: '/m/' + m.id, 'data-link': true },
     h('div', { class: 'mon-head' },
@@ -96,10 +111,13 @@ function renderHome(list) {
 async function detail(id, v) {
   const signal = v.abort.signal;
   // at is the current zoom: level 'days', 'hours' (of day) or 'checks' (of hour).
-  const st = { at: { level: 'days' }, m: null, seq: 0, shown: 0, drafts: new Map() };
-  const els = { head: h('div'), uptime: h('div', { class: 'card' }), latency: h('div', { class: 'card' }), incidents: h('div', { class: 'card' }) };
+  const st = { at: { level: 'days' }, m: null, events: [], seq: 0, shown: 0, drafts: new Map() };
+  const els = {
+    head: h('div'), health: h('div', { class: 'slot' }), uptime: h('div', { class: 'card' }), latency: h('div', { class: 'card' }),
+    events: h('div', { class: 'slot' }), incidents: h('div', { class: 'card' }),
+  };
   fill(app, h('a', { href: '/', 'data-link': true, class: 'muted' }, '← All monitors'),
-    els.head, els.uptime, els.latency, els.incidents);
+    els.head, els.health, els.uptime, els.latency, els.events, els.incidents);
 
   // A failed zoom is shown as a toast; losing the monitor (404) ends the view.
   const fail = err => err.status && err.status !== 404 ? toast(err.message, true) : failed(v, err);
@@ -129,15 +147,15 @@ async function detail(id, v) {
       const [buckets, pts] = await Promise.all([api(`/monitors/${id}/hours?from=${from}&to=${to}`, { signal }), checkPoints(id, from, to, signal)]);
       const by = new Map(buckets.map(b => [b.t, b]));
       slots = hrs.map(t => {
-        const b = by.get(t) || { n: 0, up: 0 };
-        return { t, n: b.n, up: b.up, label: fmt.time(t), detail: summary(b), pick: () => zoom({ ...at, level: 'checks', hour: t }) };
+        const b = by.get(t) || { n: 0, up: 0, warn: 0 };
+        return { t, n: b.n, up: b.up, warn: b.warn, label: fmt.time(t), detail: summary(b), pick: () => zoom({ ...at, level: 'checks', hour: t }) };
       });
       // Raw checks may have been quantized away; chart the hourly means instead.
       points = pts.length ? pts : buckets.filter(b => b.up).map(b => ({ t: b.t + 1800, ms: b.ms, up: true, label: fmt.time(b.t) + ' (hourly mean)' }));
     } else {
       from = at.hour; to = from + 3600;
       points = await checkPoints(id, from, to, signal);
-      slots = points.map(p => ({ t: p.t, n: 1, up: p.up ? 1 : 0, label: p.label, detail: p.up ? fmt.ms(p.ms) : p.text }));
+      slots = points.map(p => ({ t: p.t, n: 1, up: p.up ? 1 : 0, warn: p.degr ? 1 : 0, label: p.label, detail: p.up ? fmt.ms(p.ms) + (p.degr ? ' · degraded' : '') : p.text }));
     }
     if (seq !== st.seq) return;
     st.at = at;
@@ -149,8 +167,10 @@ async function detail(id, v) {
   function renderHead() {
     const m = st.m;
     document.title = m.name + ' · blip';
-    const up = m.last && isUp(m.last.code);
-    const week = m.days.filter(d => d.t >= Date.now() / 1000 - 7 * 86400);
+    const s = state(m.last);
+    const r = m.report;
+    const now = Date.now() / 1000;
+    const week = m.days.filter(d => d.t >= now - 7 * 86400);
     fill(els.head,
       h('div', { class: 'detail-head' },
         statusDot(m),
@@ -158,11 +178,40 @@ async function detail(id, v) {
         h('span', { class: 'pill' + (m.public ? '' : ' private') }, m.public ? 'public' : 'private')),
       m.url && h('p', { class: 'muted mono' }, m.method + ' ' + m.url),
       h('div', { class: 'facts' },
-        fact(m.last ? (up ? 'Up' : codeText(m.last.code)) : 'Pending', 'Status'),
+        fact(s === 'down' ? codeText(m.last.code) : stateText[s], 'Status'),
         fact(m.last ? fmt.ms(m.last.ms) : '—', 'Response'),
         fact(fmt.pct(sum(week, 'up'), sum(week, 'n')), 'Uptime 7d'),
         fact(fmt.pct(sum(m.days, 'up'), sum(m.days, 'n')), 'Uptime 90d'),
-        fact('every ' + fmt.interval(m.interval), 'Checked')));
+        fact('every ' + fmt.interval(m.interval), 'Checked'),
+        r?.version && fact(r.version, 'Version', r.version),
+        r?.started && !stale(m) && s !== 'down' && fact(fmt.duration(now - r.started), 'Running for', 'Started ' + fmt.dateTime(r.started)),
+        r?.instance && fact(r.instance, 'Instance', r.instance)));
+  }
+
+  // renderHealth shows what the latest health body said. Public viewers get
+  // the status alone, which the head already shows.
+  function renderHealth() {
+    const r = st.m.report;
+    if (!r || (!r.format && !r.message && !r.components?.length)) return fill(els.health);
+    fill(els.health, h('div', { class: 'card' },
+      h('div', { class: 'section-head' }, h('h2', {}, 'Health'),
+        h('span', { class: 'muted' }, [r.format, healthText[r.status], 'read ' + fmt.ago(r.t)].filter(Boolean).join(' · '))),
+      stale(st.m) && h('p', { class: 'muted small stale' }, 'The latest response had no readable health body, so this is the last one that did.'),
+      r.message && h('p', { class: 'health-msg' }, r.message),
+      r.components?.length && h('ul', { class: 'components' }, r.components.map(c => h('li', {},
+        healthDot(c.status),
+        h('span', { class: 'cname' }, c.name),
+        c.output && h('span', { class: 'muted cout', title: c.output }, c.output),
+        h('span', { class: 'cstat' }, healthText[c.status] || c.status))))));
+  }
+
+  function renderEvents() {
+    if (!st.events.length) return fill(els.events);
+    fill(els.events, h('div', { class: 'card' },
+      h('div', { class: 'section-head' }, h('h2', {}, 'Deploys and restarts'), h('span', { class: 'muted' }, st.events.length + ' recent')),
+      h('ul', { class: 'events' }, st.events.map(e => h('li', { class: e.kind },
+        h('span', { class: 'ekind' }, eventText(e)),
+        h('span', { class: 'muted' }, fmt.dateTime(e.t) + ' · ' + fmt.ago(e.t)))))));
   }
 
   function renderUptime(slots) {
@@ -198,7 +247,8 @@ async function detail(id, v) {
     const stats = ok.length ? ` · avg ${fmt.ms(ok.reduce((a, b) => a + b, 0) / ok.length)} · max ${fmt.ms(ok.reduce((a, b) => Math.max(a, b)))}` : '';
     fill(els.latency,
       h('div', { class: 'section-head' }, h('h2', {}, 'Response time'), h('span', { class: 'muted' }, title + stats)),
-      latencyChart(points, from, to, st.m.interval * 2.5),
+      latencyChart(points, from, to, st.m.interval * 2.5,
+        st.events.map(e => ({ t: e.t, kind: e.kind, label: eventText(e) + ' · ' + fmt.date(e.t) + ' ' + fmt.timeSec(e.t) }))),
       points.length > 0 && h('div', { class: 'axis' }, h('span', {}, edge(from)), h('span', {}, edge(to))));
   }
 
@@ -253,8 +303,13 @@ async function detail(id, v) {
   const note = n => h('div', { class: 'note' }, h('p', {}, n.body), h('small', {}, (n.author ? n.author + ' · ' : '') + fmt.dateTime(n.t)));
 
   async function refresh() {
-    st.m = await api(`/monitors/${id}?days=90&tz=${tz()}`, { signal });
+    [st.m, st.events] = await Promise.all([
+      api(`/monitors/${id}?days=90&tz=${tz()}`, { signal }),
+      api(`/monitors/${id}/events?limit=50`, { signal }),
+    ]);
     renderHead();
+    renderHealth();
+    renderEvents();
     const tasks = [loadIncidents()];
     // Refresh the overview unless a zoom is in flight; deeper zooms show settled history.
     if (st.at.level === 'days' && st.shown === st.seq) tasks.push(show(st.at));
@@ -265,12 +320,16 @@ async function detail(id, v) {
   await refresh();
 }
 
-function fact(value, label) {
-  return h('div', {}, h('b', {}, value), h('span', {}, label));
+// stale reports whether the latest check came without a readable health
+// body (a proxy error page, say), leaving an older report as the newest.
+const stale = m => m.report && m.last && m.report.t < m.last.t;
+
+function fact(value, label, title) {
+  return h('div', { title }, h('b', {}, value), h('span', {}, label));
 }
 
 // checkPoints loads raw checks and shapes them for the chart and blocks.
 async function checkPoints(id, from, to, signal) {
   const cs = await api(`/monitors/${id}/checks?from=${Math.floor(from)}&to=${Math.ceil(to)}`, { signal });
-  return cs.map(c => ({ t: c.t, ms: c.ms, up: isUp(c.code), text: codeText(c.code), label: fmt.date(c.t) + ' ' + fmt.timeSec(c.t) }));
+  return cs.map(c => ({ t: c.t, ms: c.ms, up: isUp(c.code), degr: state(c) === 'degr', text: codeText(c.code), label: fmt.date(c.t) + ' ' + fmt.timeSec(c.t) }));
 }

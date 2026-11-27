@@ -8,6 +8,13 @@ plain HTML/CSS/JS status page and admin panel (installable as a PWA).
 - `/m/{id}` shows 90 days of daily blocks. Click a day to see its hours, and
   an hour to see every check, with a latency chart for the same range.
   Incidents open and close automatically; users with write access can add notes.
+- Health bodies are read automatically: the IETF `health+json` draft, Spring
+  Boot Actuator, MicroProfile Health, ASP.NET Core, Statuspage, Elasticsearch,
+  one-word text bodies and plain JSON with familiar fields. A body saying
+  `fail` marks the check down even on a 200, `warn` marks it degraded, and
+  component checks, version, instance and uptime are shown to signed-in users.
+  Version changes and restarts are logged as events and marked on the latency
+  chart. Each monitor can point at its own fields or turn this off.
 - `/panel` is the admin panel: sign in with email and an authenticator code (TOTP).
   - **Monitors**: method, URL, frequency (10s to 24h) and public/private visibility.
   - **API**: create read-only API keys, scoped to all monitors or a chosen

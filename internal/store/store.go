@@ -131,6 +131,29 @@ CREATE TABLE api_key_monitors(
 	PRIMARY KEY(key_id, monitor_id)
 ) WITHOUT ROWID;
 CREATE INDEX api_key_monitors_monitor ON api_key_monitors(monitor_id);
+`, `
+-- Health bodies: each monitor's settings, each check's reported status,
+-- degraded counts in the rollups, the latest report, and deploy and restart
+-- events. Only changes become events, so the checks table stays small.
+ALTER TABLE monitors ADD COLUMN health TEXT NOT NULL DEFAULT '';
+ALTER TABLE checks ADD COLUMN health INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE hours ADD COLUMN warn INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE reports(
+	monitor_id INTEGER PRIMARY KEY REFERENCES monitors ON DELETE CASCADE,
+	t          INTEGER NOT NULL,
+	source     TEXT NOT NULL, -- the method, URL and health settings it was read with
+	body       TEXT NOT NULL, -- the report as JSON
+	state      BLOB NOT NULL  -- the restart and deploy tracker's state as JSON
+);
+CREATE TABLE events(
+	monitor_id INTEGER NOT NULL REFERENCES monitors ON DELETE CASCADE,
+	t          INTEGER NOT NULL,
+	kind       TEXT NOT NULL,
+	instance   TEXT NOT NULL,
+	from_v     TEXT NOT NULL,
+	to_v       TEXT NOT NULL,
+	PRIMARY KEY(monitor_id, t, kind, instance)
+) WITHOUT ROWID;
 `}
 
 func (db *DB) migrate() error {

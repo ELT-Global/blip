@@ -1,6 +1,6 @@
 // Admin panel at /panel: sign-in, enrollment, and the Monitors, Users and
 // Settings sections.
-import { h, $, fill, api, fmt, codeText, isUp, poll, toast, registerSW } from './lib.js';
+import { h, $, fill, api, fmt, codeText, isUp, state, stateText, poll, toast, registerSW } from './lib.js';
 
 const app = $('#app');
 const rank = { read: 1, write: 2, root: 3 };
@@ -141,9 +141,19 @@ const content = () => $('.content');
 
 const intervals = [10, 30, 60, 120, 300, 600, 900, 1800, 3600, 21600, 43200, 86400];
 
+// paths are the health fields a monitor can point at: [key, label, example].
+const paths = [
+  ['status', 'Status', 'status'],
+  ['version', 'Version', 'build.version'],
+  ['started', 'Start time', 'process.started_at'],
+  ['uptime', 'Uptime', 'process.uptime'],
+  ['instance', 'Instance', 'host.name'],
+];
+
 function monitorDialog(m, onSaved) {
   const err = errBox();
   const opts = !m || intervals.includes(m.interval) ? intervals : [...intervals, m.interval].sort((a, b) => a - b);
+  const hc = m?.health || { mode: 'auto' };
   const form = h('form', {},
     h('h2', {}, m ? 'Edit monitor' : 'New monitor'),
     h('label', {}, 'Name', h('input', { name: 'name', required: true, maxLength: 100, value: m?.name || '', placeholder: 'API' })),
@@ -156,13 +166,24 @@ function monitorDialog(m, onSaved) {
         h('option', { value: '1', selected: m?.public ?? true }, 'Public'),
         h('option', { value: '0', selected: m && !m.public }, 'Private')))),
     h('label', {}, 'URL', h('input', { name: 'url', type: 'url', required: true, value: m?.url || '', placeholder: 'https://example.com/health' })),
+    h('label', {}, 'Response body', h('select', { name: 'mode' },
+      h('option', { value: 'auto', selected: hc.mode !== 'off' }, 'Read health details (status, version, uptime)'),
+      h('option', { value: 'off', selected: hc.mode === 'off' }, 'Ignore it'))),
+    h('details', { class: 'fields', open: paths.some(([k]) => hc[k]) },
+      h('summary', {}, 'Custom health fields'),
+      h('p', { class: 'muted small' }, 'blip recognises common health formats on its own. Point at your own fields with dotted paths such as ',
+        h('code', {}, 'app.build.version'), ' or ', h('code', {}, 'checks.0.status'), '. A path you set replaces detection for that field.'),
+      h('div', { class: 'grid' }, paths.map(([k, label, ph]) =>
+        h('label', {}, label, h('input', { name: 'h_' + k, maxLength: 200, value: hc[k] || '', placeholder: ph, class: 'mono' }))))),
     err,
     h('div', { class: 'row' },
       h('button', { type: 'button', onclick: () => dlg.close() }, 'Cancel'),
       h('button', { class: 'primary', type: 'submit' }, m ? 'Save' : 'Create')));
   const dlg = h('dialog', { 'aria-label': m ? 'Edit monitor' : 'New monitor' }, form);
   submitter(form, err, async fd => {
-    const body = { name: fd.get('name'), method: fd.get('method'), url: fd.get('url'), interval: +fd.get('interval'), public: fd.get('public') === '1' };
+    const health = { mode: fd.get('mode') };
+    for (const [k] of paths) if (fd.get('h_' + k).trim()) health[k] = fd.get('h_' + k).trim();
+    const body = { name: fd.get('name'), method: fd.get('method'), url: fd.get('url'), interval: +fd.get('interval'), public: fd.get('public') === '1', health };
     await api(m ? '/monitors/' + m.id : '/monitors', { method: m ? 'PUT' : 'POST', body });
     dlg.close();
     toast(m ? 'Monitor saved' : 'Monitor created');
@@ -194,8 +215,8 @@ async function monitors(v) {
     fill(box, h('table', {},
       h('thead', {}, h('tr', {}, ['Status', 'Name', 'Target', 'Every', 'Visibility', 'Last check', ''].map(t => h('th', {}, t)))),
       h('tbody', {}, list.map(m => h('tr', {},
-        h('td', {}, h('span', { class: 'dot' + (m.last ? isUp(m.last.code) ? ' up' : ' down' : ''), title: m.last ? isUp(m.last.code) ? 'Up' : 'Down' : 'Pending' })),
-        h('td', {}, h('a', { href: '/m/' + m.id }, m.name)),
+        h('td', {}, h('span', { class: 'dot ' + state(m.last), title: stateText[state(m.last)] })),
+        h('td', {}, h('a', { href: '/m/' + m.id }, m.name), m.report?.version && h('div', { class: 'muted sub mono' }, m.report.version)),
         h('td', { class: 'url mono', title: m.url }, m.method + ' ' + m.url),
         h('td', {}, fmt.interval(m.interval)),
         h('td', {}, h('span', { class: 'pill' + (m.public ? '' : ' private') }, m.public ? 'public' : 'private')),

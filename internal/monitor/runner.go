@@ -15,10 +15,13 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
+	"github.com/ELT-Global/blip/internal/health"
 	"github.com/ELT-Global/blip/internal/store"
 )
 
@@ -34,11 +37,19 @@ type Runner struct {
 	client  *http.Client
 	results chan store.Check
 
-	mu     sync.Mutex
-	jobs   map[int64]context.CancelFunc
-	latest map[int64]store.Check
-	ctx    context.Context
-	wg     sync.WaitGroup
+	mu       sync.Mutex
+	jobs     map[int64]context.CancelFunc
+	latest   map[int64]store.Check
+	trackers map[int64]tracked
+	ctx      context.Context
+	wg       sync.WaitGroup
+}
+
+// tracked is a monitor's health tracker and the source it follows (see
+// store.Monitor.Source); a new source starts tracking over.
+type tracked struct {
+	source string
+	t      *health.Tracker
 }
 
 // New returns a runner that records to db. Call Run to start it.
@@ -57,9 +68,10 @@ func New(db *store.DB) *Runner {
 				return nil
 			},
 		},
-		results: make(chan store.Check, maxBatch),
-		jobs:    map[int64]context.CancelFunc{},
-		latest:  map[int64]store.Check{},
+		results:  make(chan store.Check, maxBatch),
+		jobs:     map[int64]context.CancelFunc{},
+		latest:   map[int64]store.Check{},
+		trackers: map[int64]tracked{},
 	}
 }
 
@@ -120,6 +132,33 @@ func (r *Runner) Remove(id int64) {
 		delete(r.jobs, id)
 	}
 	delete(r.latest, id)
+	delete(r.trackers, id)
+}
+
+// tracker returns the monitor's health tracker, resuming from the state
+// saved with its last report when that came from the same source. Trackers
+// outlive probe loops, so an edit doesn't lose events still in the queue.
+func (r *Runner) tracker(ctx context.Context, m store.Monitor) *health.Tracker {
+	r.mu.Lock()
+	tr, ok := r.trackers[m.ID]
+	r.mu.Unlock()
+	if ok && tr.source == m.Source() {
+		return tr.t
+	}
+	var saved []byte
+	if !ok {
+		if _, source, state, err := r.db.LastReport(ctx, m.ID); err == nil && source == m.Source() {
+			saved = state
+		}
+	}
+	tr = tracked{source: m.Source(), t: health.NewTracker(saved)}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur, ok := r.trackers[m.ID]; ok && cur.source == m.Source() {
+		return cur.t // another loop got here first
+	}
+	r.trackers[m.ID] = tr
+	return tr.t
 }
 
 // Latest returns the most recent result for a monitor.
@@ -147,13 +186,17 @@ func (r *Runner) loop(ctx context.Context, m store.Monitor, delay time.Duration)
 	every := time.Duration(m.Interval) * time.Second
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
+	var tr *health.Tracker
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
 		}
-		c := r.probe(ctx, m, min(every, maxTimeout))
+		if tr == nil {
+			tr = r.tracker(ctx, m)
+		}
+		c := r.probe(ctx, m, tr, min(every, maxTimeout))
 		if ctx.Err() != nil {
 			return // stopped mid-probe; the result is meaningless
 		}
@@ -162,30 +205,77 @@ func (r *Runner) loop(ctx context.Context, m store.Monitor, delay time.Duration)
 	}
 }
 
-func (r *Runner) probe(ctx context.Context, m store.Monitor, timeout time.Duration) store.Check {
+func (r *Runner) probe(ctx context.Context, m store.Monitor, tr *health.Tracker, timeout time.Duration) store.Check {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
 	c := store.Check{MonitorID: m.ID, T: start.Unix()}
+	var body []byte
+	var ctype string
 	req, err := http.NewRequestWithContext(ctx, m.Method, m.URL, nil)
 	if err == nil {
 		req.Header.Set("User-Agent", "blip/1")
+		if !m.Health.Off() {
+			req.Header.Set("Accept", "application/health+json, application/json;q=0.9, */*;q=0.5")
+		}
 		var resp *http.Response
 		if resp, err = r.client.Do(req); err == nil {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
+			// Read one byte past the limit to tell a whole body from a cut one.
+			body, _ = io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 			resp.Body.Close()
+			ctype = resp.Header.Get("Content-Type")
 			c.Code = resp.StatusCode
 			if !store.Up(c.Code) {
 				c.Err = resp.Status
 			}
 		}
 	}
-	c.Ms = int(time.Since(start).Milliseconds())
+	latency := time.Since(start)
+	c.Ms = int(latency.Milliseconds())
 	if err != nil {
 		c.Code = classify(err)
 		c.Err = cause(c.Code, err)
+		return c
+	}
+	if len(body) <= maxBody {
+		applyHealth(&c, m, tr, start, latency, ctype, body)
 	}
 	return c
+}
+
+// applyHealth reads a response body's health report into c. A body that
+// reports failure turns an otherwise successful check into a failed one.
+func applyHealth(c *store.Check, m store.Monitor, tr *health.Tracker, at time.Time, latency time.Duration, ctype string, body []byte) {
+	rep, ok := health.Parse(ctype, body, m.Health)
+	if !ok {
+		return
+	}
+	started, events, state := tr.Observe(at, latency, rep)
+	c.Health = rep.Status
+	c.Report = &store.Report{
+		T: c.T, Format: rep.Format, Status: rep.Status, Version: rep.Label(), Instance: rep.Instance,
+		Started: started, Message: rep.Message, Components: rep.Components,
+	}
+	c.Source, c.State, c.Events = m.Source(), state, events
+	// Causes are shown on public status pages, so they name components but
+	// leave out the body's free-text messages.
+	failing := strings.Join(rep.Failing(), ", ")
+	if n := 150; len(failing) > n {
+		for !utf8.RuneStart(failing[n]) {
+			n--
+		}
+		failing = failing[:n] + "…"
+	}
+	switch {
+	case store.Up(c.Code) && rep.Status == health.Fail:
+		c.Code = store.CodeUnhealthy
+		c.Err = "Health check failed"
+		if failing != "" {
+			c.Err += ": " + failing
+		}
+	case !store.Up(c.Code) && failing != "":
+		c.Err += " (" + failing + ")"
+	}
 }
 
 // cause describes a failure without the target URL or host, since incident
@@ -273,6 +363,7 @@ func (r *Runner) write() {
 		r.mu.Lock()
 		for _, c := range batch {
 			if _, ok := r.jobs[c.MonitorID]; ok {
+				c.Report, c.State, c.Events = nil, nil, nil // stored; Latest needs only the outcome
 				r.latest[c.MonitorID] = c
 			}
 		}

@@ -147,7 +147,7 @@ func TestAPIKeys(t *testing.T) {
 	e.mustBearer(rot.Key, "/api/monitors", 200, nil)
 
 	// Expired keys are refused.
-	raw, err := sql.Open("sqlite", e.dbPath)
+	raw, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)") // wait out the checker's writes
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,9 +258,24 @@ func TestSpecConformance(t *testing.T) {
 	var k apiKey
 	root.mustDo("POST", "/api/keys", map[string]any{"name": "Spec", "all_monitors": true}, 201, &k)
 
+	// A health body and a deploy, so the report and event schemas have data.
+	path := fmt.Sprintf("/api/monitors/%d", m.ID)
+	healthBody := func(v string) string {
+		return `{"status":"pass","version":"` + v + `","hostname":"web-1","started_at":"2026-01-02T03:04:05Z",` +
+			`"message":"fine","checks":{"db":{"status":"warn","output":"slow"}}}`
+	}
+	e.respond(200, healthBody("1.0"))
+	var evs []any
+	eventually(t, "a report", func() bool {
+		var mv struct{ Report *struct{ Version string } }
+		root.mustDo("GET", path, nil, 200, &mv)
+		return mv.Report != nil && mv.Report.Version == "1.0"
+	})
+	e.respond(200, healthBody("2.0"))
+	eventually(t, "a deploy event", func() bool { root.mustDo("GET", path+"/events", nil, 200, &evs); return len(evs) > 0 })
+
 	// An incident with a note, so every schema has data to check.
 	e.status.Store(503)
-	path := fmt.Sprintf("/api/monitors/%d", m.ID)
 	var incs []incident
 	eventually(t, "an incident", func() bool { root.mustDo("GET", path+"/incidents", nil, 200, &incs); return len(incs) > 0 })
 	writer.mustDo("POST", fmt.Sprintf("/api/incidents/%d/notes", incs[0].ID), map[string]string{"body": "on it"}, 201, nil)
@@ -326,7 +341,7 @@ func TestSpecConformance(t *testing.T) {
 		}
 	}
 
-	for _, p := range []string{"", "/hours", "/checks", "/incidents"} {
+	for _, p := range []string{"", "/hours", "/checks", "/incidents", "/events"} {
 		docPath := "/api/monitors/{id}" + p
 		var body any
 		e.mustBearer(k.Key, path+p, 200, &body)

@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,8 +36,15 @@ type env struct {
 	db     *store.DB
 	dbPath string
 	target string
-	status atomic.Int32 // what the target responds with
-	hits   atomic.Int64 // requests the target has received
+	status atomic.Int32           // what the target responds with
+	body   atomic.Pointer[string] // and its JSON body, if set
+	hits   atomic.Int64           // requests the target has received
+}
+
+// respond sets the target's status and JSON body.
+func (e *env) respond(status int, body string) {
+	e.body.Store(&body)
+	e.status.Store(int32(status))
 }
 
 func setup(t *testing.T) *env {
@@ -50,7 +58,14 @@ func setup(t *testing.T) *env {
 	e.status.Store(200)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.hits.Add(1)
+		body := e.body.Load()
+		if body != nil {
+			w.Header().Set("Content-Type", "application/json")
+		}
 		w.WriteHeader(int(e.status.Load()))
+		if body != nil {
+			io.WriteString(w, *body)
+		}
 	}))
 	e.target = target.URL
 
@@ -895,3 +910,144 @@ func atoi(s string) (n int) {
 	fmt.Sscan(s, &n)
 	return n
 }
+
+// A health body that reports failure turns a 200 into an outage, degraded
+// checks are counted but stay up, and public callers see only the status.
+func TestHealthBody(t *testing.T) {
+	e := setup(t)
+	root := e.root("root@example.com")
+	var m monitorView
+	root.mustDo("POST", "/api/monitors", map[string]any{"name": "API", "url": e.target, "interval": 1, "public": true}, 201, &m)
+	path := fmt.Sprintf("/api/monitors/%d", m.ID)
+	anon := e.anon()
+	type report struct {
+		Status, Format, Version, Instance string
+		Started                           int64
+		Components                        []struct{ Name, Status string }
+	}
+	var mv struct {
+		Health *struct{ Mode string }
+		Report *report
+		Days   []struct{ Warn int }
+	}
+	get := func(c *client) {
+		mv.Report, mv.Health = nil, nil
+		c.mustDo("GET", path, nil, 200, &mv)
+	}
+
+	e.respond(200, `{"status":"UP","components":{"db":{"status":"UP"},"redis":{"status":"UP"}}}`)
+	eventually(t, "a passing report", func() bool { get(root); return mv.Report != nil && mv.Report.Status == "pass" })
+	if mv.Report.Format != "Spring Boot Actuator" || len(mv.Report.Components) != 2 || mv.Health == nil || mv.Health.Mode != "auto" {
+		t.Errorf("report = %+v, health = %+v", mv.Report, mv.Health)
+	}
+
+	// Down in the body, 200 on the wire: an incident naming the component.
+	e.respond(200, `{"status":"DOWN","components":{"db":{"status":"DOWN"},"redis":{"status":"UP"}}}`)
+	var incs []incident
+	eventually(t, "an incident", func() bool { anon.mustDo("GET", path+"/incidents", nil, 200, &incs); return len(incs) > 0 })
+	if incs[0].Code != store.CodeUnhealthy || incs[0].Cause != "Health check failed: db" {
+		t.Errorf("incident = %+v", incs[0])
+	}
+
+	// Degraded resolves the incident but is counted.
+	e.respond(200, `{"status":"Degraded","entries":{"db":{"status":"Degraded"}},"totalDuration":"00:00:00.01"}`)
+	eventually(t, "the incident to resolve", func() bool {
+		anon.mustDo("GET", path+"/incidents", nil, 200, &incs)
+		return incs[0].Ended != nil
+	})
+	eventually(t, "a degraded check in the rollup", func() bool { get(root); return len(mv.Days) > 0 && mv.Days[len(mv.Days)-1].Warn > 0 })
+
+	// The public sees the status but not versions, instances or components.
+	e.respond(200, `{"status":"ok","version":"1.0","hostname":"web-1","uptime_seconds":100,"checks":{"db":"ok"}}`)
+	eventually(t, "a version", func() bool { get(root); return mv.Report.Version == "1.0" && mv.Report.Started > 0 })
+	if mv.Report.Instance != "web-1" {
+		t.Errorf("report = %+v", mv.Report)
+	}
+	get(anon)
+	if mv.Report == nil || mv.Report.Status != "pass" || mv.Report.Version != "" || mv.Report.Instance != "" ||
+		mv.Report.Format != "" || mv.Report.Components != nil || mv.Health != nil {
+		t.Errorf("public report = %+v, health = %+v", mv.Report, mv.Health)
+	}
+
+	// A deploy is an event; anonymous callers get only its time and kind.
+	e.respond(200, `{"status":"ok","version":"1.1","hostname":"web-1","uptime_seconds":100}`)
+	type event struct {
+		T                        int64
+		Kind, Instance, From, To string
+	}
+	var evs []event
+	eventually(t, "a deploy", func() bool {
+		root.mustDo("GET", path+"/events", nil, 200, &evs)
+		return slices.ContainsFunc(evs, func(e event) bool { return e.Kind == "deploy" })
+	})
+	i := slices.IndexFunc(evs, func(e event) bool { return e.Kind == "deploy" })
+	if evs[i].From != "1.0" || evs[i].To != "1.1" {
+		t.Errorf("deploy = %+v", evs[i])
+	}
+	evs = nil
+	anon.mustDo("GET", path+"/events", nil, 200, &evs)
+	for _, ev := range evs {
+		if ev.From != "" || ev.To != "" || ev.Instance != "" {
+			t.Errorf("public event = %+v", ev)
+		}
+	}
+
+	// A body that stops being readable (a proxy's error page, say) leaves the
+	// last report in place, older than the latest check, so it can be shown
+	// as stale.
+	var last struct {
+		Last   struct{ T int64 }
+		Report struct {
+			T       int64
+			Version string
+		}
+	}
+	e.body.Store(ptr("<html>Bad gateway</html>"))
+	eventually(t, "a check without a readable body", func() bool {
+		root.mustDo("GET", path, nil, 200, &last)
+		return last.Last.T > last.Report.T
+	})
+	if last.Report.Version != "1.1" {
+		t.Errorf("stale report = %+v, want the last readable one", last.Report)
+	}
+
+	// Pointing the version at another field changes what is read, so the
+	// old report is hidden and tracking starts over instead of logging the
+	// new field's value as a deploy.
+	root.mustDo("PUT", path, map[string]any{"name": "API", "url": e.target, "interval": 1, "public": true,
+		"health": map[string]string{"mode": "auto", "version": "build"}}, 200, nil)
+	get(root)
+	if mv.Report != nil {
+		t.Errorf("report after changing settings = %+v, want none until the next read", mv.Report)
+	}
+	e.respond(200, `{"status":"ok","version":"1.1","build":"b-77"}`)
+	eventually(t, "a report with the new field", func() bool { get(root); return mv.Report != nil && mv.Report.Version == "b-77" })
+	time.Sleep(2500 * time.Millisecond)
+	evs = nil
+	root.mustDo("GET", path+"/events", nil, 200, &evs)
+	if n := len(slices.DeleteFunc(evs, func(e event) bool { return e.Kind != "deploy" })); n != 1 {
+		t.Errorf("deploys after changing the version field = %d, want still 1", n)
+	}
+
+	// Turning it off ignores the body, so a failing one no longer counts, and
+	// the old report is no longer shown.
+	root.mustDo("PUT", path, map[string]any{"name": "API", "url": e.target, "interval": 1, "public": true, "health": map[string]string{"mode": "off"}}, 200, nil)
+	e.respond(200, `{"status":"down"}`)
+	time.Sleep(2500 * time.Millisecond)
+	var cs []struct {
+		Code   int
+		Health string
+	}
+	anon.mustDo("GET", path+"/checks?from="+fmt.Sprint(time.Now().Unix()-1), nil, 200, &cs)
+	for _, c := range cs {
+		if c.Code != 200 || c.Health != "" {
+			t.Errorf("check with health off = %+v", c)
+		}
+	}
+	if get(root); mv.Report != nil {
+		t.Errorf("report with health off = %+v", mv.Report)
+	}
+	root.mustDo("PUT", path, map[string]any{"name": "API", "url": e.target, "interval": 1, "health": map[string]string{"mode": "sometimes"}}, 400, nil)
+}
+
+func ptr(s string) *string { return &s }

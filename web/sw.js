@@ -2,7 +2,7 @@
 // so a deploy shows up on the next load. When the network is slow (3s) or
 // gone, the cached copy is served instead, which can briefly mix versions.
 // API calls are never cached.
-const CACHE = 'blip-v4';
+const CACHE = 'blip-v5';
 const SHELL = ['/', '/panel', '/app.css', '/lib.js', '/status.js', '/panel.js', '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => {

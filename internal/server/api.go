@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ELT-Global/blip/internal/health"
 	"github.com/ELT-Global/blip/internal/store"
 )
 
@@ -20,23 +22,39 @@ type monitorView struct {
 	URL      string         `json:"url,omitempty"`
 	Interval int            `json:"interval"`
 	Public   bool           `json:"public"`
+	Health   *health.Config `json:"health,omitempty"`
 	Last     *store.Check   `json:"last"`
+	Report   *store.Report  `json:"report"`
 	Days     []store.Bucket `json:"days"`
 }
 
 func (s *Server) view(r *http.Request, m store.Monitor, trusted bool, days int) (monitorView, error) {
 	v := monitorView{ID: m.ID, Name: m.Name, Interval: m.Interval, Public: m.Public}
 	if trusted {
-		v.Method, v.URL = m.Method, m.URL
+		v.Method, v.URL, v.Health = m.Method, m.URL, &m.Health
 	}
 	if c, ok := s.runner.Latest(m.ID); ok {
 		v.Last = &c
+	}
+	rep, source, _, err := s.db.LastReport(r.Context(), m.ID)
+	if err == nil && source != m.Source() {
+		// Read with other settings, or before health reading was turned off.
+		err = store.ErrNotFound
+	}
+	switch {
+	case err == nil && trusted:
+		v.Report = &rep
+	case err == nil:
+		// Versions, instances and component names describe internals, so
+		// public pages get the status alone.
+		v.Report = &store.Report{T: rep.T, Status: rep.Status}
+	case !errors.Is(err, store.ErrNotFound):
+		return v, err
 	}
 	// Start at local midnight so the oldest day is whole.
 	tz := tzOffset(r)
 	today := (time.Now().Unix() + int64(tz)) / 86400
 	from := (today-int64(days)+1)*86400 - int64(tz)
-	var err error
 	v.Days, err = s.db.Days(r.Context(), m.ID, from, tz)
 	return v, err
 }
@@ -149,6 +167,27 @@ func (s *Server) monitorChecks(w http.ResponseWriter, r *http.Request) {
 	reply(r, w, http.StatusOK, cs)
 }
 
+func (s *Server) monitorEvents(w http.ResponseWriter, r *http.Request) {
+	m, who, ok := s.visible(w, r)
+	if !ok {
+		return
+	}
+	now := time.Now().Unix()
+	to := queryInt(r, "to", now+1)
+	from := queryInt(r, "from", to-90*86400)
+	es, err := s.db.Events(r.Context(), m.ID, from, to, int(max(1, min(500, queryInt(r, "limit", 100)))))
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	if !who.trusted() { // versions and instance names stay with trusted callers
+		for i := range es {
+			es[i].Instance, es[i].From, es[i].To = "", "", ""
+		}
+	}
+	reply(r, w, http.StatusOK, es)
+}
+
 func (s *Server) monitorIncidents(w http.ResponseWriter, r *http.Request) {
 	m, who, ok := s.visible(w, r)
 	if !ok {
@@ -193,7 +232,9 @@ func (s *Server) readMonitor(w http.ResponseWriter, r *http.Request) (store.Moni
 	case m.Interval < s.minInterval || m.Interval > 86400:
 		msg = "interval must be between " + strconv.Itoa(s.minInterval) + " and 86400 seconds"
 	default:
-		return m, true
+		if msg = m.Health.Validate(); msg == "" {
+			return m, true
+		}
 	}
 	fail(w, http.StatusBadRequest, msg)
 	return m, false
