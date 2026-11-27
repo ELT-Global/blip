@@ -43,23 +43,39 @@ func loadAssets() map[string]*asset {
 		if err != nil {
 			return err
 		}
-		sum := sha256.Sum256(body)
-		// Weak: the gzip and identity bodies share it.
-		a := &asset{body: body, etag: `W/"` + base64.RawURLEncoding.EncodeToString(sum[:12]) + `"`}
-		a.ctype = cmp.Or(types[path.Ext(p)], "application/octet-stream")
-		if a.ctype != "image/png" {
-			var buf bytes.Buffer
-			gz, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-			gz.Write(body)
-			gz.Close()
-			if buf.Len() < len(body) {
-				a.gz = buf.Bytes()
-			}
-		}
-		out["/"+p] = a
+		out["/"+p] = newAsset(body, cmp.Or(types[path.Ext(p)], "application/octet-stream"))
 		return nil
 	})
 	return out
+}
+
+func newAsset(body []byte, ctype string) *asset {
+	sum := sha256.Sum256(body)
+	// Weak: the gzip and identity bodies share it.
+	a := &asset{body: body, ctype: ctype, etag: `W/"` + base64.RawURLEncoding.EncodeToString(sum[:12]) + `"`}
+	if ctype != "image/png" {
+		var buf bytes.Buffer
+		gz, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+		gz.Write(body)
+		gz.Close()
+		if buf.Len() < len(body) {
+			a.gz = buf.Bytes()
+		}
+	}
+	return a
+}
+
+// loadDocs prepares the OpenAPI document and the reference page rendered
+// from it. Both are embedded, so a failure is a build defect.
+func loadDocs() (spec, docs *asset) {
+	sp, err := parseSpec(specJSON)
+	if err == nil {
+		var page []byte
+		if page, err = renderDocs(sp); err == nil {
+			return newAsset(specJSON, "application/json"), newAsset(page, types[".html"])
+		}
+	}
+	panic("api docs: " + err.Error())
 }
 
 // serveStatic serves embedded files, mapping app routes to their page.
@@ -79,15 +95,19 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if p == "/sw.js" {
+		w.Header().Set("Service-Worker-Allowed", "/")
+	}
+	serveAsset(w, r, a)
+}
+
+func serveAsset(w http.ResponseWriter, r *http.Request, a *asset) {
 	h := w.Header()
 	h.Set("Content-Type", a.ctype)
 	h.Set("ETag", a.etag)
 	h.Set("Vary", "Accept-Encoding")
 	// Revalidate on every load: a 304 is cheap, and deploys show up at once.
 	h.Set("Cache-Control", "no-cache")
-	if p == "/sw.js" {
-		h.Set("Service-Worker-Allowed", "/")
-	}
 	if r.Header.Get("If-None-Match") == a.etag {
 		w.WriteHeader(http.StatusNotModified)
 		return

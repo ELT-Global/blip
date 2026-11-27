@@ -10,9 +10,27 @@ plain HTML/CSS/JS status page and admin panel (installable as a PWA).
   Incidents open and close automatically; users with write access can add notes.
 - `/panel` is the admin panel: sign in with email and an authenticator code (TOTP).
   - **Monitors**: method, URL, frequency (10s to 24h) and public/private visibility.
+  - **API**: create read-only API keys, scoped to all monitors or a chosen
+    few, that expire after 7 days to a year or never. The list shows when each
+    key was last used; keys can be rotated or revoked at any time.
   - **Users**: invite users as Read, Write or Root. Invites are one-time setup
     links that expire after 7 days.
   - **Settings**: database size per table, retention, Trim and Vacuum.
+
+## API
+
+`/docs` is the API reference: a static HTML page rendered at startup from
+the embedded OpenAPI 3.1 document, which is served at `/api/openapi.json`
+for Postman, Insomnia or client generators. The API is read-only:
+
+```sh
+curl "$BLIP_URL/api/monitors" -H "Authorization: Bearer blip_k7m2q9xd_3f8hw2c9tqzv6n1mbxr4e5ka"
+```
+
+Without a key, requests see public monitors only. Keys are shown once; blip
+stores a SHA-256 hash and the public `blip_xxxxxxxx` prefix. Tests check that
+every route is either documented or deliberately internal, and that live
+responses match the documented schemas.
 
 ## Deploy on Coolify
 

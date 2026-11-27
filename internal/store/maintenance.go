@@ -65,7 +65,7 @@ type Stats struct {
 	Retained Retention   `json:"retention"`
 }
 
-var dataTables = []string{"checks", "hours", "incidents", "notes", "monitors", "users", "sessions"}
+var dataTables = []string{"checks", "hours", "incidents", "notes", "monitors", "users", "sessions", "api_keys"}
 
 // Stats reports database size and per-table row counts and bytes.
 func (db *DB) Stats(ctx context.Context) (Stats, error) {

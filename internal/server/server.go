@@ -27,18 +27,26 @@ type Server struct {
 	minInterval int
 	limiter     *limiter
 	static      map[string]*asset
+	spec, docs  *asset
+	routes      []string // registered patterns, for the spec drift test
 }
 
 // New builds a server. minInterval is the shortest check frequency, in
 // seconds, that monitors may use.
 func New(db *store.DB, runner *monitor.Runner, minInterval int) *Server {
-	return &Server{db: db, runner: runner, minInterval: minInterval, limiter: newLimiter(10, 15*time.Minute), static: loadAssets()}
+	s := &Server{db: db, runner: runner, minInterval: minInterval, limiter: newLimiter(10, 15*time.Minute), static: loadAssets()}
+	s.spec, s.docs = loadDocs()
+	return s
 }
 
 // Handler returns the HTTP handler for the API and the embedded UI.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	h := func(pattern string, fn http.HandlerFunc) { mux.HandleFunc(pattern, fn) }
+	s.routes = nil
+	h := func(pattern string, fn http.HandlerFunc) {
+		s.routes = append(s.routes, pattern)
+		mux.HandleFunc(pattern, fn)
+	}
 
 	h("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 
@@ -57,6 +65,14 @@ func (s *Server) Handler() http.Handler {
 	h("PUT /api/monitors/{id}", s.need(store.RoleWrite, s.updateMonitor))
 	h("DELETE /api/monitors/{id}", s.need(store.RoleWrite, s.deleteMonitor))
 	h("POST /api/incidents/{id}/notes", s.need(store.RoleWrite, s.addNote))
+
+	h("GET /api/keys", s.need(store.RoleRead, s.listKeys))
+	h("POST /api/keys", s.need(store.RoleRead, s.createKey))
+	h("POST /api/keys/{id}/rotate", s.need(store.RoleRead, s.rotateKey))
+	h("DELETE /api/keys/{id}", s.need(store.RoleRead, s.deleteKey))
+
+	h("GET /api/openapi.json", s.serveSpec)
+	h("GET /docs", s.serveDocs)
 
 	h("GET /api/users", s.need(store.RoleRoot, s.listUsers))
 	h("POST /api/users", s.need(store.RoleRoot, s.inviteUser))

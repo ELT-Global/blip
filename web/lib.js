@@ -80,6 +80,12 @@ export const fmt = {
     if (s < 86400) return Math.round(s / 3600) + 'h ago';
     return Math.round(s / 86400) + 'd ago';
   },
+  until(t) {
+    const s = Math.max(0, t - Date.now() / 1000);
+    if (s < 3600) return 'in ' + Math.max(1, Math.round(s / 60)) + 'm';
+    if (s < 86400) return 'in ' + Math.round(s / 3600) + 'h';
+    return 'in ' + Math.round(s / 86400) + 'd';
+  },
   duration(s) {
     s = Math.max(0, Math.round(s));
     if (s < 60) return s + 's';

@@ -218,9 +218,9 @@ async function monitors(v) {
 
 // copy copies text, falling back to selecting it where the clipboard API is
 // unavailable (it needs HTTPS).
-function copy(text, input) {
+function copy(text, input, what = 'Link') {
   if (!navigator.clipboard) { input.focus(); input.select(); return toast('Press Ctrl+C (⌘C) to copy'); }
-  navigator.clipboard.writeText(text).then(() => toast('Link copied'), () => { input.select(); toast('Copy blocked; the link is selected'); });
+  navigator.clipboard.writeText(text).then(() => toast(what + ' copied'), () => { input.select(); toast(`Copy blocked; the ${what.toLowerCase()} is selected`); });
 }
 
 async function users(v) {
@@ -345,8 +345,140 @@ async function settings(v) {
   await load();
 }
 
+// --- API keys ---
+
+const lifetimes = [[7, '7 days'], [30, '30 days'], [90, '90 days'], [180, '6 months'], [365, '1 year'], [0, 'Never']];
+const neverWarning = () => h('div', { class: 'warn', role: 'note' },
+  h('b', {}, 'This key never expires.'),
+  ' It stays valid until someone revokes it, so a leaked copy works forever. Prefer an expiry and rotate the key when it runs out.');
+
+// keyDialog creates a key. Scope is all monitors, or a chosen subset.
+function keyDialog(list, onSaved) {
+  const err = errBox();
+  const warn = h('div');
+  const picks = h('fieldset', { class: 'picks', disabled: true },
+    h('legend', { class: 'sr' }, 'Monitors'),
+    list.length ? list.map(m => h('label', { class: 'check' },
+      h('input', { type: 'checkbox', name: 'monitor', value: m.id }),
+      h('span', {}, m.name), !m.public && h('span', { class: 'pill private' }, 'private')))
+      : h('p', { class: 'muted' }, 'No monitors yet.'));
+  const scope = v => { picks.disabled = v === 'all'; };
+  const form = h('form', {},
+    h('h2', {}, 'New API key'),
+    h('label', {}, 'Name', h('input', { name: 'name', required: true, maxLength: 100, placeholder: 'Grafana dashboard', autofocus: true })),
+    h('label', {}, 'Expires', h('select', {
+      name: 'ttl', onchange: e => fill(warn, e.target.value === '0' && neverWarning()),
+    }, lifetimes.map(([d, t]) => h('option', { value: d, selected: d === 90 }, d ? 'In ' + t : t)))),
+    warn,
+    h('div', { class: 'scope', role: 'radiogroup', 'aria-label': 'Access' },
+      h('span', { class: 'label' }, 'Access'),
+      h('label', { class: 'check' }, h('input', { type: 'radio', name: 'scope', value: 'all', checked: true, onchange: () => scope('all') }),
+        h('span', {}, 'All monitors', h('small', {}, 'Including monitors added later.'))),
+      h('label', { class: 'check' }, h('input', { type: 'radio', name: 'scope', value: 'some', onchange: () => scope('some') }),
+        h('span', {}, 'Only selected monitors')),
+      picks),
+    h('p', { class: 'muted small' }, 'Keys are read-only: they can read monitors, checks and incidents, and can’t change anything.'),
+    err,
+    h('div', { class: 'row' },
+      h('button', { type: 'button', onclick: () => dlg.close() }, 'Cancel'),
+      h('button', { class: 'primary', type: 'submit' }, 'Create key')));
+  const dlg = h('dialog', { 'aria-label': 'New API key' }, form);
+  submitter(form, err, async fd => {
+    const all = fd.get('scope') === 'all';
+    const monitors = fd.getAll('monitor').map(Number);
+    if (!all && !monitors.length) throw new Error('Choose at least one monitor.');
+    const k = await api('/keys', { method: 'POST', body: { name: fd.get('name'), ttl_days: +fd.get('ttl'), all_monitors: all, monitors: all ? [] : monitors } });
+    dlg.close();
+    onSaved();
+    revealKey(k, 'API key created');
+  });
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+// revealKey shows a new secret, the only time it is ever visible.
+function revealKey(k, title) {
+  const input = h('input', { readOnly: true, class: 'mono', value: k.key, 'aria-label': 'API key', onfocus: e => e.target.select() });
+  const dlg = h('dialog', { 'aria-label': title, class: 'reveal' },
+    h('form', { method: 'dialog' },
+      h('h2', {}, title),
+      h('p', { class: 'muted' }, `Copy the key for “${k.name}” now. blip keeps only a hash, so it can’t be shown again.`),
+      h('div', { class: 'invite' }, input, h('button', { type: 'button', class: 'primary', onclick: () => copy(k.key, input, 'Key') }, 'Copy')),
+      h('pre', { class: 'snippet' }, `curl "${location.origin}/api/monitors" \\\n  -H "Authorization: Bearer ${k.key}"`),
+      h('div', { class: 'row' }, h('a', { class: 'btn', href: '/docs', target: '_blank' }, 'API docs ↗'), h('button', { class: 'primary' }, 'Done'))));
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  input.select();
+}
+
+async function apiKeys(v) {
+  const box = h('div', { class: 'card table-wrap' });
+  let monitorsList = [];
+  const reload = () => load(true).catch(fail);
+  content().append(
+    h('div', { class: 'section-head' }, h('h1', {}, 'API'),
+      h('button', { class: 'primary', onclick: () => keyDialog(monitorsList, reload) }, '+ New API key')),
+    h('div', { class: 'card intro' },
+      h('div', {},
+        h('h2', {}, 'Read monitor data from your own tools'),
+        h('p', { class: 'muted' }, 'API keys give scripts, dashboards and other services read-only access to monitors, checks and incidents. Send a key as ',
+          h('code', {}, 'Authorization: Bearer <key>'), '. Public monitors can also be read without one.')),
+      h('a', { class: 'btn', href: '/docs' }, 'API reference →')),
+    box);
+
+  const name = id => monitorsList.find(m => m.id === id)?.name ?? '#' + id;
+  const expiry = k => {
+    if (k.expires == null) return h('span', { class: 'pill warn-pill', title: 'Valid until revoked' }, 'never expires');
+    if (k.expires <= Date.now() / 1000) return h('span', { class: 'pill bad-pill', title: fmt.dateTime(k.expires) }, 'expired');
+    return h('span', { title: fmt.dateTime(k.expires) }, fmt.date(k.expires) + ' · ' + fmt.until(k.expires));
+  };
+  const act = (label, msg, fn, cls) => h('button', {
+    class: cls, onclick: async () => {
+      if (!confirm(msg)) return;
+      try { await fn(); } catch (x) { fail(x); }
+      reload();
+    },
+  }, label);
+
+  let last = '';
+  async function load(force) {
+    const [keys, list] = await Promise.all([api('/keys', { signal: v.abort.signal }), api('/monitors?days=1', { signal: v.abort.signal })]);
+    monitorsList = list;
+    // Redraw only on change, so an idle poll doesn't steal keyboard focus.
+    const key = JSON.stringify([keys, list.map(m => [m.id, m.name])]);
+    if (key === last && !force) return;
+    last = key;
+    if (!keys.length) return fill(box, h('div', { class: 'empty' }, 'No API keys yet. Create one to read monitor data from your own tools.'));
+    const owners = new Set(keys.map(k => k.owner)).size > 1 || keys.some(k => k.owner !== me.email);
+    fill(box, h('table', { class: 'keys' },
+      h('thead', {}, h('tr', {}, ['Name', 'Key', 'Last used', 'Access', 'Expires', owners && 'Owner', ''].filter(t => t !== false).map(t => h('th', {}, t)))),
+      h('tbody', {}, keys.map(k => h('tr', {},
+        h('td', {}, h('b', { class: 'kname' }, k.name), h('div', { class: 'muted sub' }, 'Created ' + fmt.date(k.created))),
+        h('td', {}, h('code', { class: 'mono keyprefix', title: 'The rest of the key is secret' }, k.prefix + '_••••')),
+        h('td', { class: 'muted' }, k.last_used ? h('span', { title: fmt.dateTime(k.last_used) }, fmt.ago(k.last_used)) : 'Never'),
+        h('td', {}, k.all_monitors ? h('span', { class: 'pill' }, 'All monitors')
+          : h('span', { class: 'pill private', title: k.monitors.map(name).join(', ') || 'Its monitors were deleted' },
+            k.monitors.length === 1 ? name(k.monitors[0]) : k.monitors.length + ' monitors')),
+        h('td', {}, expiry(k)),
+        owners && h('td', { class: 'muted' }, k.owner),
+        h('td', { class: 'actions' },
+          act('Rotate', `Rotate "${k.name}"? Its current secret stops working immediately and the expiry restarts.`, async () => {
+            revealKey(await api(`/keys/${k.id}/rotate`, { method: 'POST' }), 'API key rotated');
+          }),
+          act('Revoke', `Revoke "${k.name}"? Anything using it will stop working.`, async () => {
+            await api('/keys/' + k.id, { method: 'DELETE' });
+            toast('API key revoked');
+          }, 'danger')))))));
+  }
+  v.stop = poll(() => load().catch(fail), 30_000);
+  await load();
+}
+
 const sections = {
   monitors: { title: 'Monitors', render: monitors },
+  api: { title: 'API', render: apiKeys },
   users: { title: 'Users', role: 'root', render: users },
   settings: { title: 'Settings', role: 'root', render: settings },
 };

@@ -11,8 +11,8 @@ import (
 	"github.com/ELT-Global/blip/internal/store"
 )
 
-// monitorView is a monitor as the UI sees it. Target details are hidden from
-// anonymous visitors so a public status page doesn't leak internal URLs.
+// monitorView is a monitor as the UI and API see it. Target details are hidden
+// from anonymous visitors so a public status page doesn't leak internal URLs.
 type monitorView struct {
 	ID       int64          `json:"id"`
 	Name     string         `json:"name"`
@@ -24,9 +24,9 @@ type monitorView struct {
 	Days     []store.Bucket `json:"days"`
 }
 
-func (s *Server) view(r *http.Request, m store.Monitor, signedIn bool, days int) (monitorView, error) {
+func (s *Server) view(r *http.Request, m store.Monitor, trusted bool, days int) (monitorView, error) {
 	v := monitorView{ID: m.ID, Name: m.Name, Interval: m.Interval, Public: m.Public}
-	if signedIn {
+	if trusted {
 		v.Method, v.URL = m.Method, m.URL
 	}
 	if c, ok := s.runner.Latest(m.ID); ok {
@@ -49,7 +49,10 @@ func tzOffset(r *http.Request) int {
 }
 
 func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
-	signedIn := s.user(r) != nil
+	who, ok := s.viewer(w, r)
+	if !ok {
+		return
+	}
 	ms, err := s.db.Monitors(r.Context())
 	if err != nil {
 		failErr(w, err)
@@ -58,10 +61,10 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 	days := int(max(1, min(90, queryInt(r, "days", 30))))
 	out := []monitorView{}
 	for _, m := range ms {
-		if !m.Public && !signedIn {
+		if !who.sees(m) {
 			continue
 		}
-		v, err := s.view(r, m, signedIn, days)
+		v, err := s.view(r, m, who.trusted(), days)
 		if err != nil {
 			failErr(w, err)
 			return
@@ -71,31 +74,35 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 	reply(r, w, http.StatusOK, out)
 }
 
-// visible loads a monitor if the requester may see it.
-func (s *Server) visible(w http.ResponseWriter, r *http.Request) (store.Monitor, bool, bool) {
+// visible loads a monitor if the requester may see it. Hidden monitors are
+// reported as missing, so their IDs can't be probed.
+func (s *Server) visible(w http.ResponseWriter, r *http.Request) (store.Monitor, viewer, bool) {
+	who, ok := s.viewer(w, r)
+	if !ok {
+		return store.Monitor{}, who, false
+	}
 	id, ok := pathID(w, r)
 	if !ok {
-		return store.Monitor{}, false, false
+		return store.Monitor{}, who, false
 	}
 	m, err := s.db.Monitor(r.Context(), id)
-	signedIn := s.user(r) != nil
-	if err == nil && !m.Public && !signedIn {
+	if err == nil && !who.sees(m) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
 		failErr(w, err)
-		return m, false, false
+		return m, who, false
 	}
-	return m, signedIn, true
+	return m, who, true
 }
 
 func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
-	m, signedIn, ok := s.visible(w, r)
+	m, who, ok := s.visible(w, r)
 	if !ok {
 		return
 	}
 	days := int(max(1, min(400, queryInt(r, "days", 90))))
-	v, err := s.view(r, m, signedIn, days)
+	v, err := s.view(r, m, who.trusted(), days)
 	if err != nil {
 		failErr(w, err)
 		return
@@ -143,7 +150,7 @@ func (s *Server) monitorChecks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) monitorIncidents(w http.ResponseWriter, r *http.Request) {
-	m, signedIn, ok := s.visible(w, r)
+	m, who, ok := s.visible(w, r)
 	if !ok {
 		return
 	}
@@ -152,7 +159,7 @@ func (s *Server) monitorIncidents(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
-	if !signedIn { // authors are email addresses; keep them off public pages
+	if who.user == nil { // authors are email addresses; keep them to signed-in users
 		for i := range is {
 			for j := range is[i].Notes {
 				is[i].Notes[j].Author = ""

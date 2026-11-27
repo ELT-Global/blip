@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API reference · blip</title>
+<meta name="description" content="{{.Summary}}">
+<meta name="theme-color" content="#10141a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f7fa" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/docs.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="panel docs">
+<nav class="side" aria-label="API reference">
+  <a class="brand" href="/"><img src="/icon.svg" alt="">blip <span class="tag">API</span></a>
+  <div class="nav-group">Guide</div>
+  <a class="nav" href="#overview">Overview</a>
+  {{- range .Sections}}
+  <a class="nav" href="#{{.ID}}">{{.Title}}</a>
+  {{- end}}
+  {{- range .Groups}}
+  <div class="nav-group">{{.Name}}</div>
+  {{- range .Ops}}
+  <a class="nav op" href="#{{.ID}}"><span class="verb">{{.Method}}</span>{{.Summary}}</a>
+  {{- end}}
+  {{- end}}
+  <div class="nav-group">Models</div>
+  {{- range .Models}}
+  <a class="nav mono-nav" href="#{{.ID}}">{{.Name}}</a>
+  {{- end}}
+  <div class="foot">
+    <a class="nav" href="/api/openapi.json">openapi.json ↓</a>
+    <a class="nav" href="/panel/api">Manage API keys ↗</a>
+  </div>
+</nav>
+
+<main class="content doc" id="main">
+  <header class="hero" id="overview">
+    <div class="eyebrow">API reference</div>
+    <h1>{{.Title}}</h1>
+    <p class="lede">{{.Summary}}</p>
+    <div class="row meta">
+      <span class="pill">v{{.Version}}</span>
+      <span class="pill">OpenAPI {{.OpenAPI}}</span>
+      <span class="pill">JSON</span>
+      <span class="pill">Read-only</span>
+    </div>
+    <div class="prose">{{.Intro}}</div>
+    <div class="row actions">
+      <a class="btn primary" href="/panel/api">Create an API key</a>
+      <a class="btn" href="/api/openapi.json">Download openapi.json</a>
+    </div>
+  </header>
+
+  {{- range .Sections}}
+  <section class="guide" id="{{.ID}}">
+    <h2><a class="anchor" href="#{{.ID}}">{{.Title}}</a></h2>
+    <div class="prose">{{.Body}}</div>
+  </section>
+  {{- end}}
+
+  {{- range .Groups}}
+  <section class="group" id="{{.ID}}">
+    <div class="group-head">
+      <h2><a class="anchor" href="#{{.ID}}">{{.Name}}</a></h2>
+      <div class="prose muted">{{.Description}}</div>
+    </div>
+    {{- range .Ops}}
+    <article class="endpoint card" id="{{.ID}}">
+      <div class="op-line">
+        <span class="verb">{{.Method}}</span>
+        <code class="path">{{.PathHTML}}</code>
+        <a class="hash" href="#{{.ID}}" aria-label="Link to {{.Summary}}">#</a>
+      </div>
+      <div class="op-body">
+        <div class="op-main">
+          <h3>{{.Summary}}</h3>
+          <div class="prose">{{.Description}}</div>
+          <p class="op-auth"><span class="pill{{if .AuthNote}} key{{end}}">{{.Auth}}</span>{{if .AuthNote}} <span class="muted">{{.AuthNote}}</span>{{end}}</p>
+
+          {{- if .Params}}
+          <h4>Parameters</h4>
+          <dl class="fields">
+            {{- range .Params}}
+            <div class="field">
+              <dt><code>{{.Name}}</code><span class="type">{{.Type}}</span><span class="in">{{.In}}</span>{{if .Required}}<span class="req">required</span>{{end}}</dt>
+              <dd>{{.Description}}{{if .Meta}}<p class="constraint">{{.Meta}}</p>{{end}}</dd>
+            </div>
+            {{- end}}
+          </dl>
+          {{- end}}
+
+          <h4>Responses</h4>
+          <ul class="responses">
+            {{- range .Responses}}
+            <li><span class="code {{if .OK}}ok{{else}}bad{{end}}">{{.Code}}</span><span class="status">{{.Status}}</span>{{if .Type}}<span class="type">{{.Type}}</span>{{end}}<div class="desc">{{.Description}}</div></li>
+            {{- end}}
+          </ul>
+        </div>
+        <div class="op-aside">
+          <figure class="sample">
+            <figcaption>Request</figcaption>
+            <pre class="code"><code>{{.Request}}</code></pre>
+          </figure>
+          {{- if .Example}}
+          <figure class="sample">
+            <figcaption>Response <span class="code ok">{{.ExampleCode}}</span></figcaption>
+            <pre class="code"><code>{{.Example}}</code></pre>
+          </figure>
+          {{- end}}
+        </div>
+      </div>
+    </article>
+    {{- end}}
+  </section>
+  {{- end}}
+
+  <section class="group" id="models">
+    <div class="group-head">
+      <h2><a class="anchor" href="#models">Models</a></h2>
+      <div class="prose muted"><p>The objects the endpoints return. Fields marked required are always present; a field may still be <code>null</code> where its type says so.</p></div>
+    </div>
+    {{- range .Models}}
+    <article class="endpoint card model" id="{{.ID}}">
+      <div class="op-line"><code class="path">{{.Name}}</code><a class="hash" href="#{{.ID}}" aria-label="Link to {{.Name}}">#</a></div>
+      <div class="op-body">
+        <div class="op-main">
+          <div class="prose">{{.Description}}</div>
+          <dl class="fields">
+            {{- range .Fields}}
+            <div class="field">
+              <dt><code>{{.Name}}</code><span class="type">{{.Type}}</span>{{if .Required}}<span class="req">required</span>{{end}}</dt>
+              <dd>{{.Description}}{{if .Meta}}<p class="constraint">{{.Meta}}</p>{{end}}</dd>
+            </div>
+            {{- end}}
+          </dl>
+        </div>
+        <div class="op-aside">
+          <figure class="sample">
+            <figcaption>Example</figcaption>
+            <pre class="code"><code>{{.Example}}</code></pre>
+          </figure>
+        </div>
+      </div>
+    </article>
+    {{- end}}
+  </section>
+  <footer class="doc-foot muted">Generated from <a href="/api/openapi.json">openapi.json</a> when this server started.</footer>
+</main>
+</div>
+</body>
+</html>

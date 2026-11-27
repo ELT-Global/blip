@@ -1,0 +1,353 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "blip API",
+    "version": "1.0.0",
+    "summary": "Read uptime, latency and incident data for your monitors.",
+    "description": "The blip API is read-only and returns JSON. It serves the same monitor data as the status page: current status, daily and hourly uptime, every raw check, and incidents with their notes.\n\nEvery endpoint works without credentials for **public** monitors. An API key adds private monitors and each monitor's method and URL.\n\n```sh\ncurl \"$BLIP_URL/api/monitors\" -H \"Authorization: Bearer $BLIP_KEY\"\n```\n\n## Authentication\n\nCreate a key in the panel under **API**, then send it as a bearer token in the `Authorization` header.\n\nKeys look like `blip_k7m2q9xd_3f8hw2c9tqzv6n1mbxr4e5ka`. The first part, `blip_k7m2q9xd`, is the key's public prefix, which the panel lists so you can tell keys apart. The rest is the secret. blip stores only a hash of it and shows it once, when the key is created or rotated.\n\n- A key sees exactly the monitors it was scoped to (or all of them), public or private.\n- An invalid, revoked, rotated or expired key gets `401`. It never falls back to public data, so a broken integration fails loudly.\n- Keys are read-only. They can't change monitors or reach the panel's own endpoints.\n- Rotating a key issues a new secret and restarts its expiry. The old secret stops working at once.\n\nRequests without an `Authorization` header see public monitors only, without their method and URL. Signed-in panel sessions see everything.\n\n## Errors\n\nErrors use standard HTTP status codes with a JSON body holding one message:\n\n```json\n{ \"error\": \"API key has expired\" }\n```\n\n- `401`: the key is malformed, unknown or expired. The response carries `WWW-Authenticate: Bearer`.\n- `404`: the monitor doesn't exist **or** the caller can't see it. The two are indistinguishable on purpose.\n- `500`: an unexpected server error. Retry with backoff.\n\n## Time and units\n\n- Timestamps are Unix seconds, UTC.\n- `ms` is latency in milliseconds.\n- `code` is the HTTP status a check received, or a negative value when no response arrived: `0` connection error, `-1` timeout, `-2` DNS failure, `-3` connection refused, `-4` TLS error. Statuses 200–399 count as up.\n- Hourly buckets align to UTC hours. Daily buckets start at local midnight for the `tz` offset you pass.\n- Buckets are sparse: hours and days without checks are left out.\n- Ranges are half-open: `from` is included, `to` is not.\n\n## Retention\n\nRaw checks are kept for 30 days and hourly rollups for 400 days by default. An admin can change both in the panel, so older ranges may come back shorter than requested."
+  },
+  "servers": [
+    { "url": "/", "description": "This blip instance" }
+  ],
+  "security": [
+    { "apiKey": [] },
+    {}
+  ],
+  "tags": [
+    { "name": "Monitors", "description": "Monitors and their history. Every response is filtered to what the caller may see." },
+    { "name": "Meta", "description": "This document and the service's health." }
+  ],
+  "paths": {
+    "/api/monitors": {
+      "get": {
+        "operationId": "listMonitors",
+        "tags": ["Monitors"],
+        "summary": "List monitors",
+        "description": "Returns every monitor the caller can see, sorted by name, each with its latest check and recent daily uptime.",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "description": "How many days of daily buckets to include, counting today.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 90, "default": 30 },
+            "example": 30
+          },
+          { "$ref": "#/components/parameters/tz" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The visible monitors. An empty array when there are none.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Monitor" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/monitors/{id}": {
+      "get": {
+        "operationId": "getMonitor",
+        "tags": ["Monitors"],
+        "summary": "Get a monitor",
+        "description": "Returns one monitor with its latest check and up to 400 days of daily uptime.",
+        "parameters": [
+          { "$ref": "#/components/parameters/id" },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "How many days of daily buckets to include, counting today.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 400, "default": 90 },
+            "example": 90
+          },
+          { "$ref": "#/components/parameters/tz" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The monitor.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Monitor" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/monitors/{id}/hours": {
+      "get": {
+        "operationId": "getMonitorHours",
+        "tags": ["Monitors"],
+        "summary": "Hourly uptime",
+        "description": "Returns hourly rollups for a time range, oldest first. Rollups outlive raw checks, so this is the way to read history older than the raw retention window. A span longer than 31 days is shortened by moving `from` forward.",
+        "parameters": [
+          { "$ref": "#/components/parameters/id" },
+          { "$ref": "#/components/parameters/from" },
+          { "$ref": "#/components/parameters/to" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hourly buckets whose start falls in the range.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Bucket" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/monitors/{id}/checks": {
+      "get": {
+        "operationId": "getMonitorChecks",
+        "tags": ["Monitors"],
+        "summary": "Raw checks",
+        "description": "Returns every check in a time range, oldest first, up to 20,000 of them. A span longer than 7 days is shortened by moving `from` forward. To page through a busy monitor, repeat the request with `from` set to one second after the last check's `t`.",
+        "parameters": [
+          { "$ref": "#/components/parameters/id" },
+          { "$ref": "#/components/parameters/from" },
+          { "$ref": "#/components/parameters/to" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Checks in the range.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Check" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/monitors/{id}/incidents": {
+      "get": {
+        "operationId": "getMonitorIncidents",
+        "tags": ["Monitors"],
+        "summary": "Incidents",
+        "description": "Returns a monitor's most recent incidents, newest first, with their notes. An incident opens at the first failed check and closes at the next successful one.",
+        "parameters": [
+          { "$ref": "#/components/parameters/id" },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many incidents to return.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+            "example": 50
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Incidents, newest first.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Incident" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "operationId": "getOpenAPI",
+        "tags": ["Meta"],
+        "summary": "OpenAPI document",
+        "description": "Returns this document as OpenAPI 3.1 JSON. Import it into Postman, Insomnia or a client generator. It is served with `Access-Control-Allow-Origin: *` so browser-based tools can load it.",
+        "security": [{}],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "content": { "application/json": { "schema": { "type": "object", "description": "An OpenAPI 3.1 document." } } }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "tags": ["Meta"],
+        "summary": "Health check",
+        "description": "Answers `ok` while the server is running. Suited to load balancers and container health checks.",
+        "security": [{}],
+        "responses": {
+          "200": {
+            "description": "The server is up.",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "blip_<8-char id>_<24-char secret>",
+        "description": "An API key created in the panel under **API**, sent as `Authorization: Bearer <key>`."
+      }
+    },
+    "parameters": {
+      "id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The monitor's ID, as returned by `listMonitors`.",
+        "schema": { "type": "integer", "minimum": 1 },
+        "example": 1
+      },
+      "tz": {
+        "name": "tz",
+        "in": "query",
+        "description": "Your UTC offset in seconds east of UTC, so daily buckets start at your local midnight. For example `19800` for UTC+05:30 or `-18000` for UTC−05:00.",
+        "schema": { "type": "integer", "minimum": -50400, "maximum": 50400, "default": 0 },
+        "example": 0
+      },
+      "from": {
+        "name": "from",
+        "in": "query",
+        "description": "Start of the range, Unix seconds (inclusive). Defaults to one day before `to`.",
+        "schema": { "type": "integer" },
+        "example": 1764201600
+      },
+      "to": {
+        "name": "to",
+        "in": "query",
+        "description": "End of the range, Unix seconds (exclusive). Defaults to now.",
+        "schema": { "type": "integer" },
+        "example": 1764288000
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "The `Authorization` header holds a malformed, unknown, revoked or expired key.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "invalid API key" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such monitor, or the caller can't see it.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "not found" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Monitor": {
+        "type": "object",
+        "description": "An HTTP endpoint that blip checks on a fixed interval.",
+        "required": ["id", "name", "interval", "public", "last", "days"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "description": "Stable ID. IDs of deleted monitors are never reused.", "example": 1 },
+          "name": { "type": "string", "description": "Display name.", "example": "API" },
+          "method": {
+            "type": "string",
+            "description": "HTTP method used for checks. Only present for API keys and signed-in users.",
+            "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "example": "GET"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "The URL being checked. Only present for API keys and signed-in users.",
+            "example": "https://api.example.com/health"
+          },
+          "interval": { "type": "integer", "description": "Seconds between checks.", "example": 60 },
+          "public": { "type": "boolean", "description": "Whether the monitor is listed on the public status page.", "example": true },
+          "last": {
+            "description": "The most recent check, or `null` before the first one.",
+            "oneOf": [{ "$ref": "#/components/schemas/Check" }, { "type": "null" }]
+          },
+          "days": {
+            "type": "array",
+            "description": "Daily buckets, oldest first, starting at local midnight for the requested `tz`. Days without checks are left out.",
+            "items": { "$ref": "#/components/schemas/Bucket" }
+          }
+        }
+      },
+      "Check": {
+        "type": "object",
+        "description": "One probe of a monitor.",
+        "required": ["t", "ms", "code"],
+        "additionalProperties": false,
+        "properties": {
+          "t": { "type": "integer", "description": "When the check ran, Unix seconds.", "example": 1764287940 },
+          "ms": { "type": "integer", "description": "Response time in milliseconds.", "example": 142 },
+          "code": {
+            "type": "integer",
+            "description": "HTTP status, or `0` connection error, `-1` timeout, `-2` DNS failure, `-3` connection refused, `-4` TLS error. 200–399 is up.",
+            "example": 200
+          }
+        }
+      },
+      "Bucket": {
+        "type": "object",
+        "description": "Checks aggregated over an hour or a day.",
+        "required": ["t", "n", "up", "ms"],
+        "additionalProperties": false,
+        "properties": {
+          "t": { "type": "integer", "description": "Start of the bucket, Unix seconds.", "example": 1764201600 },
+          "n": { "type": "integer", "description": "Number of checks.", "example": 1440 },
+          "up": { "type": "integer", "description": "How many of them were up. Uptime is `up / n`.", "example": 1438 },
+          "ms": { "type": "integer", "description": "Mean response time of the successful checks, or `0` if none succeeded.", "example": 138 }
+        }
+      },
+      "Incident": {
+        "type": "object",
+        "description": "A stretch of failed checks.",
+        "required": ["id", "start", "ended", "code", "cause", "notes"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "example": 12 },
+          "start": { "type": "integer", "description": "Time of the first failed check, Unix seconds.", "example": 1764250200 },
+          "ended": {
+            "type": ["integer", "null"],
+            "description": "Time of the first successful check after it, or `null` while ongoing.",
+            "example": 1764250500
+          },
+          "code": { "type": "integer", "description": "The failing check's code (see `Check.code`).", "example": 503 },
+          "cause": { "type": "string", "description": "What went wrong, in words.", "example": "503 Service Unavailable" },
+          "notes": { "type": "array", "description": "Notes added by the team, oldest first.", "items": { "$ref": "#/components/schemas/Note" } }
+        }
+      },
+      "Note": {
+        "type": "object",
+        "description": "A comment on an incident.",
+        "required": ["id", "author", "t", "body"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "example": 3 },
+          "author": {
+            "type": "string",
+            "description": "The author's email for signed-in users. Empty for API keys and anonymous callers, since keys are often given to third parties.",
+            "example": ""
+          },
+          "t": { "type": "integer", "description": "When the note was added, Unix seconds.", "example": 1764250380 },
+          "body": { "type": "string", "description": "Plain text.", "example": "Upstream provider outage; failing over." }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": { "type": "string", "description": "A human-readable message.", "example": "not found" }
+        }
+      }
+    }
+  }
+}

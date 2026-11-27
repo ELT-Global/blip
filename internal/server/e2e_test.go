@@ -33,6 +33,7 @@ type env struct {
 	t      *testing.T
 	url    string
 	db     *store.DB
+	dbPath string
 	target string
 	status atomic.Int32 // what the target responds with
 	hits   atomic.Int64 // requests the target has received
@@ -40,11 +41,12 @@ type env struct {
 
 func setup(t *testing.T) *env {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "blip.db"))
+	path := filepath.Join(t.TempDir(), "blip.db")
+	db, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, db: db}
+	e := &env{t: t, db: db, dbPath: path}
 	e.status.Store(200)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.hits.Add(1)

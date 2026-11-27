@@ -108,31 +108,61 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
+// migrations[i] takes the schema from user_version i to i+1. Append only.
+var migrations = []string{schema, `
+-- API keys are read-only credentials owned by a user. Only a hash of the
+-- secret is kept; prefix is the public part shown in lists and logs.
+CREATE TABLE api_keys(
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id      INTEGER NOT NULL REFERENCES users ON DELETE CASCADE,
+	name         TEXT NOT NULL,
+	prefix       TEXT NOT NULL UNIQUE,
+	hash         BLOB NOT NULL UNIQUE,
+	all_monitors INTEGER NOT NULL,
+	ttl_days     INTEGER NOT NULL, -- 0: never expires
+	exp          INTEGER,
+	created      INTEGER NOT NULL,
+	last_used    INTEGER
+);
+CREATE INDEX api_keys_user ON api_keys(user_id);
+CREATE TABLE api_key_monitors(
+	key_id     INTEGER NOT NULL REFERENCES api_keys ON DELETE CASCADE,
+	monitor_id INTEGER NOT NULL REFERENCES monitors ON DELETE CASCADE,
+	PRIMARY KEY(key_id, monitor_id)
+) WITHOUT ROWID;
+CREATE INDEX api_key_monitors_monitor ON api_key_monitors(monitor_id);
+`}
+
 func (db *DB) migrate() error {
 	var v int
 	if err := db.sql.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return err
 	}
-	if v >= 1 {
-		return nil
+	if v == 0 {
+		// auto_vacuum must be chosen before the first table exists; INCREMENTAL
+		// lets Trim hand freed pages back to the filesystem cheaply.
+		if _, err := db.sql.Exec("PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+			return err
+		}
 	}
-	// auto_vacuum must be chosen before the first table exists; INCREMENTAL
-	// lets Trim hand freed pages back to the filesystem cheaply.
-	if _, err := db.sql.Exec("PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
-		return err
+	for ; v < len(migrations); v++ {
+		tx, err := db.sql.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(migrations[v]); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", v+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
-	tx, err := db.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(schema); err != nil {
-		return err
-	}
-	if _, err := tx.Exec("PRAGMA user_version=1"); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 // Close closes the database.
